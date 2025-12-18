@@ -1,0 +1,37 @@
+{
+  "name": "mcp-sevdesk",
+  "version": "1.0.0",
+  "description": "MCP Server for sevdesk API",
+  "type": "module",
+  "main": "dist/index.js",
+  "bin": {
+    "mcp-sevdesk": "./dist/index.js"
+  },
+  "scripts": {
+    "build": "tsc",
+    "start": "node dist/index.js",
+    "dev": "tsx src/index.ts",
+    "generate-types": "openapi-typescript openapi/sevdesk-openapi.yaml -o src/generated/sevdesk-api.ts",
+    "prepare": "npm run generate-types && npm run build"
+  },
+  "keywords": [
+    "mcp",
+    "sevdesk",
+    "api",
+    "accounting",
+    "model-context-protocol"
+  ],
+  "author": "",
+  "license": "MIT",
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.0.0",
+    "openapi-fetch": "^0.13.0",
+    "zod": "^3.23.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "openapi-typescript": "^7.0.0",
+    "tsx": "^4.0.0",
+    "typescript": "^5.6.0"
+  }
+}
