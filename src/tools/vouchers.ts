@@ -202,22 +202,19 @@ export const voucherTools = {
     description: "Update a single voucher position (line item), especially the DATEV booking account (accountDatev)",
     inputSchema: z.object({
       voucherPosId: z.number().describe("The ID of the voucher position to update"),
-      accountDatev: z.union([
-        z.number().describe("DATEV account number (Buchungskonto, e.g. 4920)"),
-        z.object({
-          id: z.number().describe("DATEV account number (Buchungskonto, e.g. 4920)"),
-          objectName: z.literal("AccountDatev").describe("SevDesk object name for accountDatev in Update 2.0"),
-        }),
-      ]).optional().describe("DATEV account as account number or SevDesk object"),
+      accountDatev: z.object({
+        id: z.number().describe("DATEV account number (Buchungskonto, e.g. 4920)"),
+        objectName: z.string().describe("SevDesk object name for accountDatev"),
+      }).optional().describe("DATEV account as SevDesk object"),
       taxRate: z.number().optional().describe("Tax rate for this position"),
       sum: z.number().optional().describe("Net sum for this position"),
       comment: z.string().optional().describe("Internal comment/note"),
     }),
     handler: async (client: SevdeskClient, params: {
       voucherPosId: number;
-      accountDatev?: number | {
+      accountDatev?: {
         id: number;
-        objectName: "AccountDatev";
+        objectName: string;
       };
       taxRate?: number;
       sum?: number;
@@ -225,15 +222,10 @@ export const voucherTools = {
     }) => {
       const body: Record<string, any> = {};
       if (params.accountDatev !== undefined) {
-        body.accountDatev = typeof params.accountDatev === "number"
-          ? {
-              id: params.accountDatev,
-              objectName: "AccountDatev",
-            }
-          : {
-              id: params.accountDatev.id,
-              objectName: "AccountDatev",
-            };
+        body.accountDatev = {
+          id: params.accountDatev.id,
+          objectName: params.accountDatev.objectName,
+        };
       }
       if (params.taxRate !== undefined) body.taxRate = params.taxRate;
       if (params.sum !== undefined) body.sum = params.sum;
