@@ -205,6 +205,28 @@ function zodTypeToJsonSchema(zodType: z.ZodType): object {
     return schema;
   }
 
+  // Handle object
+  if (zodType instanceof z.ZodObject) {
+    const properties: Record<string, object> = {};
+    const required: string[] = [];
+    const shape = zodType.shape as Record<string, z.ZodType>;
+    for (const [key, value] of Object.entries(shape)) {
+      properties[key] = zodTypeToJsonSchema(value);
+      if (!(value instanceof z.ZodOptional)) {
+        required.push(key);
+      }
+    }
+    const schema: Record<string, unknown> = { type: "object", properties };
+    if (required.length > 0) schema.required = required;
+    if (zodType.description) schema.description = zodType.description;
+    return schema;
+  }
+
+  // Handle literal
+  if (zodType instanceof z.ZodLiteral) {
+    return { type: typeof zodType._def.value, enum: [zodType._def.value] };
+  }
+
   // Default fallback
   return { type: "string" };
 }
