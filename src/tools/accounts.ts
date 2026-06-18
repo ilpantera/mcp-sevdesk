@@ -12,7 +12,14 @@ export const accountTools = {
       limit?: number;
       offset?: number;
     }) => {
-      const { data, error } = await client.GET("/CheckAccount", {});
+      const { data, error } = await client.GET("/CheckAccount", {
+        params: {
+          query: {
+            limit: params.limit,
+            offset: params.offset,
+          } as any,
+        },
+      });
       if (error) throw new Error(JSON.stringify(error));
       return data;
     },
@@ -38,7 +45,7 @@ export const accountTools = {
     description: "Get the current balance of a check account",
     inputSchema: z.object({
       checkAccountId: z.number().describe("The ID of the check account"),
-      date: z.string().optional().describe("Date for the balance (Unix timestamp). Default: now"),
+      date: z.string().optional().describe("Date for the balance in ISO format YYYY-MM-DD. Default: today"),
     }),
     handler: async (client: SevdeskClient, params: {
       checkAccountId: number;
@@ -61,8 +68,8 @@ export const accountTools = {
     description: "List all transactions of a check account",
     inputSchema: z.object({
       checkAccountId: z.number().describe("The ID of the check account"),
-      startDate: z.string().optional().describe("Filter by start date (Unix timestamp)"),
-      endDate: z.string().optional().describe("Filter by end date (Unix timestamp)"),
+      startDate: z.string().optional().describe("Filter by start date as ISO date-time string"),
+      endDate: z.string().optional().describe("Filter by end date as ISO date-time string"),
       paymtPurpose: z.string().optional().describe("Filter by payment purpose"),
       isBooked: z.boolean().optional().describe("Filter by booked status"),
       limit: z.number().optional().describe("Limit the number of results"),
@@ -82,8 +89,8 @@ export const accountTools = {
           query: {
             "checkAccount[id]": params.checkAccountId,
             "checkAccount[objectName]": "CheckAccount",
-            startDate: params.startDate ? Number(params.startDate) : undefined,
-            endDate: params.endDate ? Number(params.endDate) : undefined,
+            startDate: params.startDate,
+            endDate: params.endDate,
             paymtPurpose: params.paymtPurpose,
             isBooked: params.isBooked,
             limit: params.limit,
