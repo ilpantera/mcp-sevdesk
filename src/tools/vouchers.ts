@@ -202,17 +202,20 @@ export const voucherTools = {
     description: "Update a single voucher position (line item), especially the DATEV booking account (accountDatev)",
     inputSchema: z.object({
       voucherPosId: z.number().describe("The ID of the voucher position to update"),
-      accountDatev: z.object({
-        id: z.number().describe("DATEV account number (Buchungskonto, e.g. 4920)"),
-        objectName: z.literal("AccountingType").describe("SevDesk object name for accounting type"),
-      }).optional().describe("DATEV account as SevDesk object"),
+      accountDatev: z.union([
+        z.number().describe("DATEV account number (Buchungskonto, e.g. 4920)"),
+        z.object({
+          id: z.number().describe("DATEV account number (Buchungskonto, e.g. 4920)"),
+          objectName: z.literal("AccountingType").describe("SevDesk object name for accounting type"),
+        }),
+      ]).optional().describe("DATEV account as account number or SevDesk object"),
       taxRate: z.number().optional().describe("Tax rate for this position"),
       sum: z.number().optional().describe("Net sum for this position"),
       comment: z.string().optional().describe("Internal comment/note"),
     }),
     handler: async (client: SevdeskClient, params: {
       voucherPosId: number;
-      accountDatev?: {
+      accountDatev?: number | {
         id: number;
         objectName: "AccountingType";
       };
@@ -222,10 +225,15 @@ export const voucherTools = {
     }) => {
       const body: Record<string, any> = {};
       if (params.accountDatev !== undefined) {
-        body.accountDatev = {
-          id: params.accountDatev.id,
-          objectName: params.accountDatev.objectName,
-        };
+        body.accountDatev = typeof params.accountDatev === "number"
+          ? {
+              id: params.accountDatev,
+              objectName: "AccountingType",
+            }
+          : {
+              id: params.accountDatev.id,
+              objectName: params.accountDatev.objectName,
+            };
       }
       if (params.taxRate !== undefined) body.taxRate = params.taxRate;
       if (params.sum !== undefined) body.sum = params.sum;
