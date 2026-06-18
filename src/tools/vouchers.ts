@@ -206,7 +206,7 @@ export const voucherTools = {
         z.number().describe("DATEV account number (Buchungskonto, e.g. 4920)"),
         z.object({
           id: z.number().describe("DATEV account number (Buchungskonto, e.g. 4920)"),
-          objectName: z.literal("AccountingType").describe("SevDesk object name for accounting type"),
+          objectName: z.literal("AccountDatev").describe("SevDesk object name for accountDatev in Update 2.0"),
         }),
       ]).optional().describe("DATEV account as account number or SevDesk object"),
       taxRate: z.number().optional().describe("Tax rate for this position"),
@@ -217,7 +217,7 @@ export const voucherTools = {
       voucherPosId: number;
       accountDatev?: number | {
         id: number;
-        objectName: "AccountingType";
+        objectName: "AccountDatev";
       };
       taxRate?: number;
       sum?: number;
@@ -228,11 +228,11 @@ export const voucherTools = {
         body.accountDatev = typeof params.accountDatev === "number"
           ? {
               id: params.accountDatev,
-              objectName: "AccountingType",
+              objectName: "AccountDatev",
             }
           : {
               id: params.accountDatev.id,
-              objectName: params.accountDatev.objectName,
+              objectName: "AccountDatev",
             };
       }
       if (params.taxRate !== undefined) body.taxRate = params.taxRate;
@@ -269,7 +269,8 @@ export const voucherTools = {
       const { data, error } = await client.GET("/VoucherPos", {
         params: {
           query: {
-            accountDatev: params.accountDatev,
+            "accountDatev[id]": params.accountDatev,
+            "accountDatev[objectName]": "AccountDatev",
             startDate: params.startDate ? Number(params.startDate) : undefined,
             endDate: params.endDate ? Number(params.endDate) : undefined,
             limit: params.limit,
