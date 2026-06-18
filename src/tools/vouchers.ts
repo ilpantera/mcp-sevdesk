@@ -153,7 +153,7 @@ export const voucherTools = {
     inputSchema: z.object({
       voucherId: z.number().describe("The ID of the voucher to update"),
       status: z.enum(["50", "100", "1000"]).optional().describe("Voucher status: 50=Draft, 100=Unpaid/Open, 1000=Paid/Booked"),
-      taxType: z.enum(["default", "eu", "noteu", "custom", "ss"]).optional().describe("Tax treatment type"),
+      taxType: z.enum(["default", "eu", "noteu", "custom", "ss"]).optional().describe("Deprecated v1 tax treatment type. API v2 may ignore this; prefer taxRule."),
       taxRule: z.object({
         id: z.number().describe(
           "TaxRule ID for expenses: " +
@@ -181,7 +181,7 @@ export const voucherTools = {
       creditDebit: z.enum(["C", "D"]).optional().describe("C=Credit, D=Debit"),
       description: z.string().optional().describe("Description/memo"),
       supplierId: z.number().optional().describe("Contact ID of the supplier"),
-      supplierName: z.string().optional().describe("Supplier name (used when supplierId is set)"),
+      supplierName: z.string().optional().describe("Supplier name (used when supplierId is not set)"),
       voucherDate: z.string().optional().describe("Voucher date as Unix timestamp string"),
       payDate: z.string().optional().describe("Payment date as Unix timestamp string"),
     }),
@@ -239,7 +239,7 @@ export const voucherTools = {
     inputSchema: z.object({
       voucherPosId: z.number().describe("The ID of the voucher position to update"),
       accountDatev: z.object({
-        id: z.number().describe("DATEV account number (Buchungskonto, e.g. 4920)"),
+        id: z.number().describe("Internal SevDesk accountDatev ID (not the SKR04 account number itself)"),
         objectName: z.string().describe("SevDesk object name for accountDatev"),
       }).optional().describe("DATEV account as SevDesk object"),
       taxRate: z.number().optional().describe("Tax rate for this position"),
@@ -399,7 +399,7 @@ export const voucherTools = {
 
   create_voucher: {
     description:
-      "Create a new voucher (expense receipt) with positions via POST /Voucher/Factory/saveVoucher.",
+      "Create a new expense voucher (receipt) with positions via POST /Voucher/Factory/saveVoucher.",
     inputSchema: z.object({
       voucherDate: z.string().describe("Voucher date ISO format YYYY-MM-DDTHH:mm:ss"),
       deliveryDate: z.string().optional(),
@@ -417,7 +417,7 @@ export const voucherTools = {
       supplierName: z.string().optional().describe("Supplier name if ID unknown"),
       voucherPositions: z.array(z.object({
         accountDatev: z.object({
-          id: z.number().describe("Internal SevDesk accountDatev ID (from get_receipt_guidance)"),
+          id: z.number().describe("Internal SevDesk accountDatev ID (from get_receipt_guidance, not the SKR04 number)"),
           objectName: z.literal("AccountDatev"),
         }),
         taxRate: z.number().describe("VAT rate: 19, 7, or 0"),
@@ -440,7 +440,7 @@ export const voucherTools = {
         mapAll: true,
         voucherDate: params.voucherDate,
         status: params.status ?? 50,
-        creditDebit: "C",
+        creditDebit: "D",
         voucherType: "VOU",
         ...(params.deliveryDate && { deliveryDate: params.deliveryDate }),
         ...(params.paymentDeadline && { paymentDeadline: params.paymentDeadline }),
@@ -478,7 +478,7 @@ export const voucherTools = {
     inputSchema: z.object({
       voucherId: z.number().describe("ID of the existing voucher"),
       accountDatev: z.object({
-        id: z.number().describe("Internal SevDesk accountDatev ID (from get_receipt_guidance)"),
+        id: z.number().describe("Internal SevDesk accountDatev ID (from get_receipt_guidance, not the SKR04 number)"),
         objectName: z.literal("AccountDatev"),
       }),
       taxRate: z.number().describe("VAT rate: 19, 7, or 0"),
