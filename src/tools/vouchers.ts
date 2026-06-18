@@ -156,13 +156,26 @@ export const voucherTools = {
       taxType: z.enum(["default", "eu", "noteu", "custom", "ss"]).optional().describe("Tax treatment type"),
       taxRule: z.object({
         id: z.number().describe(
-          "TaxRule ID: 9=standard deductible VAT, 12=reverse charge with VAT deduction (non-EU services), " +
-          "13=reverse charge without VAT deduction"
+          "TaxRule ID for expenses: " +
+          "9=standard deductible (Deutschland), " +
+          "8=innergemeinschaftlicher Erwerb (EU), " +
+          "14=Reverse Charge EU §13b Abs.1, " +
+          "12=Reverse Charge non-EU §13b Abs.2 MIT Vorsteuerabzug (z.B. USA, UK), " +
+          "13=Reverse Charge non-EU OHNE Vorsteuerabzug, " +
+          "10=nicht vorsteuerabziehbar"
         ),
         objectName: z.literal("TaxRule"),
       }).optional().describe("Tax rule (API v2). Replaces deprecated taxType."),
       deliveryDate: z.string().optional().describe(
-        "Delivery/service date in ISO format YYYY-MM-DDTHH:mm:ss (e.g. '2024-01-15T00:00:00')"
+        "Delivery/service date in ISO format YYYY-MM-DDTHH:mm:ss"
+      ),
+      paymentDeadline: z.string().optional().describe(
+        "Payment deadline in ISO format YYYY-MM-DDTHH:mm:ss"
+      ),
+      supplierCountry: z.enum(["DE", "EU", "NON_EU"]).optional().describe(
+        "Helper: supplier country origin. DE=Deutschland, EU=within EU, NON_EU=outside EU (e.g. USA). " +
+        "When provided and taxRule is not set, auto-selects the correct taxRule: " +
+        "DE→9, EU→14, NON_EU→12"
       ),
       taxRate: z.number().optional().describe("Overall tax rate in percent"),
       creditDebit: z.enum(["C", "D"]).optional().describe("C=Credit, D=Debit"),
@@ -178,6 +191,8 @@ export const voucherTools = {
       taxType?: "default" | "eu" | "noteu" | "custom" | "ss";
       taxRule?: { id: number; objectName: "TaxRule" };
       deliveryDate?: string;
+      paymentDeadline?: string;
+      supplierCountry?: "DE" | "EU" | "NON_EU";
       taxRate?: number;
       creditDebit?: "C" | "D";
       description?: string;
@@ -186,11 +201,18 @@ export const voucherTools = {
       voucherDate?: string;
       payDate?: string;
     }) => {
+      let taxRule = params.taxRule;
+      if (!taxRule && params.supplierCountry) {
+        const countryMap: Record<string, number> = { DE: 9, EU: 14, NON_EU: 12 };
+        taxRule = { id: countryMap[params.supplierCountry], objectName: "TaxRule" };
+      }
+
       const body: Record<string, any> = {};
       if (params.status !== undefined) body.status = Number(params.status);
       if (params.taxType !== undefined) body.taxType = params.taxType;
-      if (params.taxRule !== undefined) body.taxRule = { id: params.taxRule.id, objectName: "TaxRule" };
+      if (taxRule !== undefined) body.taxRule = { id: taxRule.id, objectName: "TaxRule" };
       if (params.deliveryDate !== undefined) body.deliveryDate = params.deliveryDate;
+      if (params.paymentDeadline !== undefined) body.paymentDeadline = params.paymentDeadline;
       if (params.taxRate !== undefined) body.taxRate = params.taxRate;
       if (params.creditDebit !== undefined) body.creditDebit = params.creditDebit;
       if (params.description !== undefined) body.description = params.description;
@@ -223,15 +245,10 @@ export const voucherTools = {
       taxRate: z.number().optional().describe("Tax rate for this position"),
       sum: z.number().optional().describe("Net sum for this position"),
       net: z.boolean().optional().describe(
-        "If true, 'sum'/'sumNet' is treated as net amount and gross is calculated. " +
-        "If false, 'sumGross' is the base. Defaults to true on most positions."
+        "If true, sum/sumNet is net amount and gross is calculated. Default: true on most positions."
       ),
-      sumNet: z.number().optional().describe(
-        "Net amount of the position. Alias for 'sum'. Use this when net=true."
-      ),
-      sumGross: z.number().optional().describe(
-        "Gross amount of the position (net + VAT). Use this to set the gross directly."
-      ),
+      sumNet: z.number().optional().describe("Net amount. Use when net=true."),
+      sumGross: z.number().optional().describe("Gross amount (net + VAT). Use to set gross directly."),
       comment: z.string().optional().describe("Internal comment/note"),
     }),
     handler: async (client: SevdeskClient, params: {
@@ -257,9 +274,9 @@ export const voucherTools = {
           }),
           ...(params.taxRate !== undefined && { taxRate: params.taxRate }),
           ...(params.sum !== undefined && { sum: String(params.sum) }),
+          ...(params.net !== undefined && { net: params.net }),
           ...(params.sumNet !== undefined && { sumNet: String(params.sumNet) }),
           ...(params.sumGross !== undefined && { sumGross: String(params.sumGross) }),
-          ...(params.net !== undefined && { net: params.net }),
           ...(params.comment !== undefined && { comment: params.comment }),
         } as any,
       });
@@ -351,110 +368,89 @@ export const voucherTools = {
 
   get_receipt_guidance: {
     description:
-      "Get DATEV account guidance for expense booking. Returns accountDatevId (internal SevDesk integer ID) " +
-      "and accountNumber (SKR04 account number like '6600') for use with update_voucher_position. " +
-      "Use /forAllAccounts to browse all expense accounts, or /forExpense to get guidance for a specific expense type.",
+      "Get DATEV account guidance for expense booking. Returns accountDatevId (internal SevDesk integer) " +
+      "and accountNumber (SKR04, e.g. '6600') for use in update_voucher_position/create_voucher. " +
+      "Use mode='forAllAccounts' to list all accounts, 'forExpense' for a specific receipt.",
     inputSchema: z.object({
       mode: z.enum(["forAllAccounts", "forExpense"]).describe(
-        "forAllAccounts: returns all available expense accounts with their IDs and SKR numbers. " +
-        "forExpense: returns guidance for a specific receipt (requires receiptAmount and receiptTaxAmount)."
+        "forAllAccounts: all expense accounts with IDs, SKR numbers and allowed taxRules. " +
+        "forExpense: guidance for a receipt (requires receiptAmount + receiptTaxAmount)."
       ),
-      receiptAmount: z.number().optional().describe(
-        "Gross receipt amount in EUR. Required for mode=forExpense."
-      ),
-      receiptTaxAmount: z.number().optional().describe(
-        "Tax amount in EUR. Required for mode=forExpense."
-      ),
+      receiptAmount: z.number().optional().describe("Gross amount in EUR. Required for forExpense."),
+      receiptTaxAmount: z.number().optional().describe("Tax amount in EUR. Required for forExpense."),
     }),
-    handler: async (
-      client: SevdeskClient,
-      params: { mode: "forAllAccounts" | "forExpense"; receiptAmount?: number; receiptTaxAmount?: number }
-    ) => {
+    handler: async (client: SevdeskClient, params: {
+      mode: "forAllAccounts" | "forExpense";
+      receiptAmount?: number;
+      receiptTaxAmount?: number;
+    }) => {
       if (params.mode === "forAllAccounts") {
         const { data, error } = await (client.GET as any)("/ReceiptGuidance/forAllAccounts", {});
         if (error) throw new Error(JSON.stringify(error));
         return data;
-      } else {
-        const { data, error } = await (client.GET as any)("/ReceiptGuidance/forExpense", {
-          params: {
-            query: {
-              receiptAmount: params.receiptAmount,
-              receiptTaxAmount: params.receiptTaxAmount,
-            },
-          },
-        });
-        if (error) throw new Error(JSON.stringify(error));
-        return data;
       }
+      const { data, error } = await (client.GET as any)("/ReceiptGuidance/forExpense", {
+        params: { query: { receiptAmount: params.receiptAmount, receiptTaxAmount: params.receiptTaxAmount } },
+      });
+      if (error) throw new Error(JSON.stringify(error));
+      return data;
     },
   },
 
   create_voucher: {
     description:
-      "Create a new voucher (expense receipt) with positions via POST /Voucher/Factory/saveVoucher. " +
-      "Use this to create new expense entries. Requires supplier contact ID or name.",
+      "Create a new voucher (expense receipt) with positions via POST /Voucher/Factory/saveVoucher.",
     inputSchema: z.object({
-      voucherDate: z.string().describe("Voucher date in ISO format YYYY-MM-DDTHH:mm:ss"),
-      deliveryDate: z.string().optional().describe("Delivery/service date in ISO format YYYY-MM-DDTHH:mm:ss"),
-      description: z.string().optional().describe("Description / voucher number from supplier"),
-      status: z.number().optional().describe("50=Draft, 100=Open. Default: 50"),
-      taxType: z.string().optional().describe("Deprecated v1 field, use taxRule instead"),
+      voucherDate: z.string().describe("Voucher date ISO format YYYY-MM-DDTHH:mm:ss"),
+      deliveryDate: z.string().optional(),
+      paymentDeadline: z.string().optional(),
+      description: z.string().optional().describe("Voucher number or description"),
+      status: z.number().optional().describe("50=Draft, 100=Open"),
       taxRule: z.object({
-        id: z.number().describe("TaxRule ID: 9=standard, 12=reverse charge with deduction, 13=without"),
+        id: z.number().describe("9=DE standard, 14=EU Reverse Charge, 12=non-EU Reverse Charge mit Vorsteuerabzug, 13=without"),
         objectName: z.literal("TaxRule"),
       }).optional(),
-      supplierId: z.number().optional().describe("SevDesk contact ID of the supplier"),
-      supplierName: z.string().optional().describe(
-        "Supplier name (used if supplierId is not known). SevDesk will try to match or create."
+      supplierCountry: z.enum(["DE", "EU", "NON_EU"]).optional().describe(
+        "Auto-selects taxRule: DE→9, EU→14, NON_EU→12. Ignored if taxRule is set explicitly."
       ),
+      supplierId: z.number().optional().describe("SevDesk contact ID of supplier"),
+      supplierName: z.string().optional().describe("Supplier name if ID unknown"),
       voucherPositions: z.array(z.object({
         accountDatev: z.object({
-          id: z.number().describe("Internal SevDesk accountDatev ID (use get_receipt_guidance to find)"),
+          id: z.number().describe("Internal SevDesk accountDatev ID (from get_receipt_guidance)"),
           objectName: z.literal("AccountDatev"),
         }),
-        taxRate: z.number().describe("VAT rate in percent, e.g. 19, 7, or 0"),
-        net: z.boolean().describe("If true, sum/sumNet is the net amount"),
-        sum: z.number().describe("Net amount if net=true, else gross"),
+        taxRate: z.number().describe("VAT rate: 19, 7, or 0"),
+        net: z.boolean().describe("true=sum is net; false=sumGross is base"),
+        sum: z.number().describe("Net amount if net=true"),
         sumNet: z.number().optional(),
         sumGross: z.number().optional(),
-        comment: z.string().optional().describe("Line item description"),
-      })).describe("List of voucher positions (line items)"),
+        comment: z.string().optional(),
+      })).describe("Line items"),
     }),
-    handler: async (client: SevdeskClient, params: {
-      voucherDate: string;
-      deliveryDate?: string;
-      description?: string;
-      status?: number;
-      taxRule?: { id: number; objectName: "TaxRule" };
-      supplierId?: number;
-      supplierName?: string;
-      voucherPositions: Array<{
-        accountDatev: { id: number; objectName: "AccountDatev" };
-        taxRate: number;
-        net: boolean;
-        sum: number;
-        sumNet?: number;
-        sumGross?: number;
-        comment?: string;
-      }>;
-    }) => {
+    handler: async (client: SevdeskClient, params: any) => {
+      let taxRule = params.taxRule;
+      if (!taxRule && params.supplierCountry) {
+        const map: Record<string, number> = { DE: 9, EU: 14, NON_EU: 12 };
+        taxRule = { id: map[params.supplierCountry], objectName: "TaxRule" };
+      }
+
       const voucher: Record<string, unknown> = {
         objectName: "Voucher",
         mapAll: true,
         voucherDate: params.voucherDate,
         status: params.status ?? 50,
+        creditDebit: "C",
+        voucherType: "VOU",
         ...(params.deliveryDate && { deliveryDate: params.deliveryDate }),
+        ...(params.paymentDeadline && { paymentDeadline: params.paymentDeadline }),
         ...(params.description && { description: params.description }),
-        ...(params.taxRule && { taxRule: params.taxRule }),
-        ...(params.supplierId && {
-          supplier: { id: params.supplierId, objectName: "Contact" },
-        }),
-        ...(params.supplierName && !params.supplierId && {
-          supplierName: params.supplierName,
-        }),
+        ...(taxRule && { taxRule }),
+        ...(params.supplierId && { supplier: { id: params.supplierId, objectName: "Contact" } }),
+        ...(params.supplierName && !params.supplierId && { supplierName: params.supplierName }),
       };
 
-      const voucherPosSave = params.voucherPositions.map((pos, i) => ({
+      const voucherPosSave = params.voucherPositions.map((pos: any, i: number) => ({
         objectName: "VoucherPos",
         mapAll: true,
         sequenceNumber: i + 1,
@@ -475,8 +471,54 @@ export const voucherTools = {
     },
   },
 
+  create_voucher_position: {
+    description:
+      "Add a new position to an existing voucher via POST /VoucherPos. " +
+      "Use this to add extra line items, e.g. Trinkgeld (tip at 0% VAT) to an existing receipt voucher.",
+    inputSchema: z.object({
+      voucherId: z.number().describe("ID of the existing voucher"),
+      accountDatev: z.object({
+        id: z.number().describe("Internal SevDesk accountDatev ID (from get_receipt_guidance)"),
+        objectName: z.literal("AccountDatev"),
+      }),
+      taxRate: z.number().describe("VAT rate: 19, 7, or 0"),
+      net: z.boolean().describe("true=sum is net amount"),
+      sum: z.number().describe("Net amount if net=true, else gross"),
+      sumNet: z.number().optional(),
+      sumGross: z.number().optional(),
+      comment: z.string().optional().describe("e.g. 'Trinkgeld'"),
+    }),
+    handler: async (client: SevdeskClient, params: {
+      voucherId: number;
+      accountDatev: { id: number; objectName: "AccountDatev" };
+      taxRate: number;
+      net: boolean;
+      sum: number;
+      sumNet?: number;
+      sumGross?: number;
+      comment?: string;
+    }) => {
+      const { data, error } = await (client.POST as any)("/VoucherPos", {
+        body: {
+          objectName: "VoucherPos",
+          mapAll: true,
+          voucher: { id: params.voucherId, objectName: "Voucher" },
+          accountDatev: { id: params.accountDatev.id, objectName: "AccountDatev" },
+          taxRate: params.taxRate,
+          net: params.net,
+          sum: String(params.sum),
+          ...(params.sumNet !== undefined && { sumNet: String(params.sumNet) }),
+          ...(params.sumGross !== undefined && { sumGross: String(params.sumGross) }),
+          ...(params.comment && { comment: params.comment }),
+        } as any,
+      });
+      if (error) throw new Error(JSON.stringify(error));
+      return data;
+    },
+  },
+
   get_voucher_document_image: {
-    description: "Get the document/receipt image attached to a voucher as base64-encoded data.",
+    description: "Get the receipt/document image attached to a voucher as base64-encoded data.",
     inputSchema: z.object({
       voucherId: z.number().describe("The ID of the voucher"),
     }),
