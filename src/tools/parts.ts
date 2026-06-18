@@ -99,6 +99,13 @@ export const partTools = {
       priceGross: z.number().optional().describe("Gross price"),
       priceNet: z.number().optional().describe("Net price"),
       taxRate: z.number().optional().describe("Tax rate in percent"),
+      text: z.string().optional().describe("Description/long text"),
+      priceNet2: z.number().optional().describe("Second net price tier"),
+      priceNet3: z.number().optional().describe("Third net price tier"),
+      priceNet4: z.number().optional().describe("Fourth net price tier"),
+      priceNet5: z.number().optional().describe("Fifth net price tier"),
+      category: z.string().optional().describe("Product category name"),
+      unitId: z.number().optional().describe("Unit (Unity) ID"),
     }),
     handler: async (client: SevdeskClient, params: {
       partId: number;
@@ -109,6 +116,13 @@ export const partTools = {
       priceGross?: number;
       priceNet?: number;
       taxRate?: number;
+      text?: string;
+      priceNet2?: number;
+      priceNet3?: number;
+      priceNet4?: number;
+      priceNet5?: number;
+      category?: string;
+      unitId?: number;
     }) => {
       const { partId, ...updateData } = params;
       const body: Record<string, any> = {};
@@ -119,6 +133,13 @@ export const partTools = {
       if (updateData.priceGross !== undefined) body.priceGross = updateData.priceGross.toString();
       if (updateData.priceNet !== undefined) body.priceNet = updateData.priceNet.toString();
       if (updateData.taxRate !== undefined) body.taxRate = updateData.taxRate.toString();
+      if (updateData.text !== undefined) body.text = updateData.text;
+      if (updateData.priceNet2 !== undefined) body.priceNet2 = updateData.priceNet2.toString();
+      if (updateData.priceNet3 !== undefined) body.priceNet3 = updateData.priceNet3.toString();
+      if (updateData.priceNet4 !== undefined) body.priceNet4 = updateData.priceNet4.toString();
+      if (updateData.priceNet5 !== undefined) body.priceNet5 = updateData.priceNet5.toString();
+      if (updateData.category !== undefined) body.category = updateData.category;
+      if (updateData.unitId !== undefined) body.unity = { id: updateData.unitId, objectName: "Unity" };
 
       const { data, error } = await client.PUT("/Part/{partId}", {
         params: {
@@ -138,6 +159,22 @@ export const partTools = {
     }),
     handler: async (client: SevdeskClient, params: { partId: number }) => {
       const { data, error } = await client.GET("/Part/{partId}/getStock", {
+        params: {
+          path: { partId: params.partId },
+        },
+      });
+      if (error) throw new Error(JSON.stringify(error));
+      return data;
+    },
+  },
+
+  delete_part: {
+    description: "Delete a part (product/service) from sevdesk",
+    inputSchema: z.object({
+      partId: z.number().describe("The ID of the part to delete"),
+    }),
+    handler: async (client: SevdeskClient, params: { partId: number }) => {
+      const { data, error } = await (client.DELETE as any)("/Part/{partId}", {
         params: {
           path: { partId: params.partId },
         },
