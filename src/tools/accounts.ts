@@ -160,4 +160,80 @@ export const accountTools = {
       return data;
     },
   },
+
+  update_transaction: {
+    description:
+      "Update an existing check account transaction (PUT /CheckAccountTransaction/{id}). " +
+      "Use to correct amount, date, purpose, or booking status of a transaction.",
+    inputSchema: z.object({
+      transactionId: z.number().describe("ID of the transaction to update"),
+      amount: z.number().optional().describe("Transaction amount (positive=credit, negative=debit)"),
+      valueDate: z.string().optional().describe("Value date YYYY-MM-DD"),
+      entryDate: z.string().optional().describe("Entry date YYYY-MM-DD"),
+      paymtPurpose: z.string().optional().describe("Payment purpose/description"),
+      payeePayerName: z.string().optional().describe("Name of payee or payer"),
+      payeePayerAcctNo: z.string().optional().describe("Account number of payee/payer"),
+      payeePayerBankCode: z.string().optional().describe("Bank code of payee/payer"),
+      status: z.number().optional().describe("Transaction status: 100=created, 200=linked, 300=private, 400=booked"),
+    }),
+    handler: async (client: SevdeskClient, params: {
+      transactionId: number;
+      amount?: number;
+      valueDate?: string;
+      entryDate?: string;
+      paymtPurpose?: string;
+      payeePayerName?: string;
+      payeePayerAcctNo?: string;
+      payeePayerBankCode?: string;
+      status?: number;
+    }) => {
+      const { data, error } = await client.PUT("/CheckAccountTransaction/{checkAccountTransactionId}", {
+        params: { path: { checkAccountTransactionId: params.transactionId } },
+        body: {
+          ...(params.amount !== undefined && { amount: params.amount }),
+          ...(params.valueDate && { valueDate: params.valueDate }),
+          ...(params.entryDate && { entryDate: params.entryDate }),
+          ...(params.paymtPurpose && { paymtPurpose: params.paymtPurpose }),
+          ...(params.payeePayerName && { payeePayerName: params.payeePayerName }),
+          ...(params.payeePayerAcctNo && { payeePayerAcctNo: params.payeePayerAcctNo }),
+          ...(params.payeePayerBankCode && { payeePayerBankCode: params.payeePayerBankCode }),
+          ...(params.status !== undefined && { status: params.status }),
+        } as any,
+      });
+      if (error) throw new Error(JSON.stringify(error));
+      return data;
+    },
+  },
+
+  delete_transaction: {
+    description: "Delete a check account transaction (DELETE /CheckAccountTransaction/{id}).",
+    inputSchema: z.object({
+      transactionId: z.number().describe("ID of the transaction to delete"),
+    }),
+    handler: async (client: SevdeskClient, params: { transactionId: number }) => {
+      const { data, error } = await client.DELETE(
+        "/CheckAccountTransaction/{checkAccountTransactionId}",
+        { params: { path: { checkAccountTransactionId: params.transactionId } } }
+      );
+      if (error) throw new Error(JSON.stringify(error));
+      return data;
+    },
+  },
+
+  enshrine_transaction: {
+    description:
+      "Enshrine a check account transaction (PUT /CheckAccountTransaction/{id}/enshrine). " +
+      "WARNING: This operation CANNOT be undone. Enshrined transactions cannot be changed.",
+    inputSchema: z.object({
+      transactionId: z.number().describe("ID of the transaction to enshrine"),
+    }),
+    handler: async (client: SevdeskClient, params: { transactionId: number }) => {
+      const { data, error } = await (client.PUT as any)(
+        "/CheckAccountTransaction/{checkAccountTransactionId}/enshrine",
+        { params: { path: { checkAccountTransactionId: params.transactionId } } }
+      );
+      if (error) throw new Error(JSON.stringify(error));
+      return data;
+    },
+  },
 };
