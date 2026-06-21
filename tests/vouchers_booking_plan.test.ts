@@ -241,4 +241,151 @@ describe("voucher booking plan helpers", () => {
     expect(POST).not.toHaveBeenCalled();
     expect(DELETE).not.toHaveBeenCalled();
   });
+
+  it("apply_voucher_booking_plan returns structured validation errors without writing", async () => {
+    const GET = vi
+      .fn()
+      .mockResolvedValueOnce({
+        data: {
+          objects: [
+            {
+              accountDatevId: 555,
+              allowedTaxRules: [{ id: 9, taxRates: ["NINETEEN"] }],
+            },
+          ],
+        },
+        error: undefined,
+      })
+      .mockResolvedValueOnce({
+        data: { objects: [{ id: 10 }] },
+        error: undefined,
+      })
+      .mockResolvedValueOnce({
+        data: { objects: [] },
+        error: undefined,
+      });
+    const PUT = vi.fn();
+    const POST = vi.fn();
+    const DELETE = vi.fn();
+
+    const result = await voucherTools.apply_voucher_booking_plan.handler(
+      { GET, PUT, POST, DELETE } as unknown as SevdeskClient,
+      {
+        voucherId: 10,
+        expectedTotalGross: 119,
+        dryRun: true,
+        positions: [
+          {
+            accountDatevId: 555,
+            taxRate: 19,
+            sumNet: 100,
+            comment: "Laptop",
+            isAsset: true,
+          },
+        ],
+      }
+    );
+
+    expect(result.ok).toBe(false);
+    expect(result.errors).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ code: "ASSET_USEFUL_LIFE_REQUIRED" }),
+      ])
+    );
+    expect(PUT).not.toHaveBeenCalled();
+    expect(POST).not.toHaveBeenCalled();
+    expect(DELETE).not.toHaveBeenCalled();
+  });
+
+  it("apply_voucher_booking_plan reports ReceiptGuidance mismatches", async () => {
+    const GET = vi
+      .fn()
+      .mockResolvedValueOnce({
+        data: {
+          objects: [
+            {
+              accountDatevId: 999,
+              allowedTaxRules: [{ id: 9, taxRates: ["NINETEEN"] }],
+            },
+          ],
+        },
+        error: undefined,
+      })
+      .mockResolvedValueOnce({
+        data: { objects: [{ id: 10 }] },
+        error: undefined,
+      })
+      .mockResolvedValueOnce({
+        data: { objects: [] },
+        error: undefined,
+      });
+
+    const result = await voucherTools.apply_voucher_booking_plan.handler(
+      { GET, PUT: vi.fn(), POST: vi.fn(), DELETE: vi.fn() } as unknown as SevdeskClient,
+      {
+        voucherId: 10,
+        expectedTotalGross: 119,
+        dryRun: true,
+        positions: [
+          {
+            accountDatevId: 555,
+            taxRate: 19,
+            sumNet: 100,
+            comment: "Büromaterial",
+          },
+        ],
+      }
+    );
+
+    expect(result.ok).toBe(false);
+    expect(result.errors).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ code: "RECEIPT_GUIDANCE_ACCOUNT_NOT_ALLOWED" }),
+      ])
+    );
+  });
+
+  it("apply_voucher_booking_plan returns a structured voucher context read error", async () => {
+    const GET = vi
+      .fn()
+      .mockResolvedValueOnce({
+        data: {
+          objects: [
+            {
+              accountDatevId: 555,
+              allowedTaxRules: [{ id: 9, taxRates: ["NINETEEN"] }],
+            },
+          ],
+        },
+        error: undefined,
+      })
+      .mockResolvedValueOnce({
+        data: undefined,
+        error: { message: "voucher unavailable" },
+      });
+
+    const result = await voucherTools.apply_voucher_booking_plan.handler(
+      { GET, PUT: vi.fn(), POST: vi.fn(), DELETE: vi.fn() } as unknown as SevdeskClient,
+      {
+        voucherId: 10,
+        expectedTotalGross: 119,
+        dryRun: true,
+        positions: [
+          {
+            accountDatevId: 555,
+            taxRate: 19,
+            sumNet: 100,
+            comment: "Büromaterial",
+          },
+        ],
+      }
+    );
+
+    expect(result.ok).toBe(false);
+    expect(result.errors).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ code: "VOUCHER_CONTEXT_READ_FAILED" }),
+      ])
+    );
+  });
 });

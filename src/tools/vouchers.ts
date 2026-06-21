@@ -409,6 +409,21 @@ async function getReceiptGuidanceForExpense(
   return unwrapObjectArray(data) as ReceiptGuidanceEntry[];
 }
 
+function findMatchingTaxRules(
+  allowedRules: ReceiptGuidanceRule[],
+  taxRuleId: number | undefined,
+  taxRate: number
+): ReceiptGuidanceRule[] {
+  if (taxRuleId !== undefined) {
+    return allowedRules.filter((rule) => rule.id === taxRuleId);
+  }
+
+  return allowedRules.filter((rule) =>
+    Array.isArray(rule.taxRates) &&
+    rule.taxRates.some((taxRateName) => RECEIPT_GUIDANCE_TAX_RATE_MAP[taxRateName] === taxRate)
+  );
+}
+
 async function validateReceiptGuidanceForPlan(
   client: SevdeskClient,
   validation: VoucherBookingPlanValidationResult
@@ -438,12 +453,11 @@ async function validateReceiptGuidanceForPlan(
       }
 
       const allowedRules = Array.isArray(accountEntry.allowedTaxRules) ? accountEntry.allowedTaxRules : [];
-      const taxRuleMatches = validation.normalizedPlan.taxRuleId === undefined
-        ? allowedRules.filter((rule) =>
-            Array.isArray(rule.taxRates) &&
-            rule.taxRates.some((taxRateName) => RECEIPT_GUIDANCE_TAX_RATE_MAP[taxRateName] === position.taxRate)
-          )
-        : allowedRules.filter((rule) => rule.id === validation.normalizedPlan.taxRuleId);
+      const taxRuleMatches = findMatchingTaxRules(
+        allowedRules,
+        validation.normalizedPlan.taxRuleId,
+        position.taxRate
+      );
 
       if (validation.normalizedPlan.taxRuleId !== undefined && taxRuleMatches.length === 0) {
         errors.push(
@@ -1001,9 +1015,7 @@ async function applyVoucherBookingPlanInternal(
     };
   }
 
-  const predictedVoucher = currentVoucherObject
-    ? { ...currentVoucherObject, ...headerBody }
-    : currentVoucher;
+  const predictedVoucher = { ...(currentVoucherObject ?? {}), ...headerBody };
   const predictedPositions = [
     ...positionsToUpdate.map((action) => {
       const existingPosition = action.voucherPosId === undefined
