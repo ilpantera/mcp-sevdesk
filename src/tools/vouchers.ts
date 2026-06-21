@@ -193,7 +193,7 @@ const RECEIPT_GUIDANCE_TAX_RATE_MAP: Record<string, number> = {
 
 function callUntypedClientMethod(
   client: SevdeskClient,
-  method: "GET" | "DELETE",
+  method: "GET" | "DELETE" | "PUT" | "POST",
   path: string,
   init: UntypedClientMethodInit
 ): UntypedClientMethodResult {
@@ -332,8 +332,17 @@ function unwrapObjectArray(value: unknown): Record<string, unknown>[] {
 }
 
 function getNumberValue(value: unknown): number | undefined {
-  const numericValue = typeof value === "string" ? Number(value) : value;
-  return typeof numericValue === "number" && Number.isFinite(numericValue) ? numericValue : undefined;
+  if (typeof value === "string") {
+    const trimmedValue = value.trim();
+    if (trimmedValue.length === 0) {
+      return undefined;
+    }
+
+    const numericValue = Number(trimmedValue);
+    return Number.isFinite(numericValue) ? numericValue : undefined;
+  }
+
+  return typeof value === "number" && Number.isFinite(value) ? value : undefined;
 }
 
 function getStringValue(value: unknown): string | undefined {
@@ -690,15 +699,17 @@ export function validateBookingPlanInternal(plan: VoucherBookingPlan): VoucherBo
       errors.push(createIssue("SUM_GROSS_NEGATIVE", `${label}.sumGross must not be negative`, `${label}.sumGross`));
     }
 
-    const expectedGross = calculateGross(position.sumNet, position.taxRate);
-    if (position.sumGross !== undefined && Math.abs(position.sumGross - expectedGross) > 0.01) {
-      errors.push(
-        createIssue(
-          "SUM_GROSS_MISMATCH",
-          `${label}.sumGross does not match sumNet + taxRate (expected ${expectedGross.toFixed(2)})`,
-          `${label}.sumGross`
-        )
-      );
+    if (position.sumGross !== undefined) {
+      const expectedGross = calculateGross(position.sumNet, position.taxRate);
+      if (Math.abs(position.sumGross - expectedGross) > 0.01) {
+        errors.push(
+          createIssue(
+            "SUM_GROSS_MISMATCH",
+            `${label}.sumGross does not match sumNet + taxRate (expected ${expectedGross.toFixed(2)})`,
+            `${label}.sumGross`
+          )
+        );
+      }
     }
 
     const usefulLife = position.assetUsefulLife;
@@ -1323,7 +1334,7 @@ export const voucherTools = {
       voucherId: z.number().int().positive().describe("Voucher ID"),
     }),
     handler: async (client: SevdeskClient, params: { voucherId: number }) => {
-      const { data, error } = await (client.PUT as any)("/Voucher/{voucherId}/resetToDraft", {
+      const { data, error } = await callUntypedClientMethod(client, "PUT", "/Voucher/{voucherId}/resetToDraft", {
         params: { path: { voucherId: params.voucherId } },
       });
       if (error) throw new Error(JSON.stringify(error));
@@ -1338,7 +1349,7 @@ export const voucherTools = {
       voucherId: z.number().int().positive().describe("Voucher ID"),
     }),
     handler: async (client: SevdeskClient, params: { voucherId: number }) => {
-      const { data, error } = await (client.PUT as any)("/Voucher/{voucherId}/resetToOpen", {
+      const { data, error } = await callUntypedClientMethod(client, "PUT", "/Voucher/{voucherId}/resetToOpen", {
         params: { path: { voucherId: params.voucherId } },
       });
       if (error) throw new Error(JSON.stringify(error));
@@ -1353,7 +1364,7 @@ export const voucherTools = {
       voucherId: z.number().int().positive().describe("Voucher ID"),
     }),
     handler: async (client: SevdeskClient, params: { voucherId: number }) => {
-      const { data, error } = await (client.PUT as any)("/Voucher/{voucherId}/enshrine", {
+      const { data, error } = await callUntypedClientMethod(client, "PUT", "/Voucher/{voucherId}/enshrine", {
         params: { path: { voucherId: params.voucherId } },
       });
       if (error) throw new Error(JSON.stringify(error));

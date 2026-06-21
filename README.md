@@ -1,6 +1,6 @@
 # mcp-sevdesk
 
-MCP-Server für sevDesk, optimiert für **sevDesk Update 2.0 / aktuelle OpenAPI**.  
+MCP-Server für sevDesk, optimiert für **sevDesk Update 2.0 / aktuelle OpenAPI**.
 Der Fokus liegt auf agent-tauglichen Buchhaltungsworkflows statt auf maximal generischen CRUD-Aufrufen.
 
 ## Positionierung
