@@ -54,7 +54,7 @@ const sevdeskClient: SevdeskClient = createSevdeskClient(API_TOKEN);
 const server = new Server(
   {
     name: "mcp-sevdesk",
-    version: "1.0.0",
+    version: "2.0.0",
   },
   {
     capabilities: {
@@ -138,7 +138,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 async function main() {
   const transport = new StdioServerTransport();
   await server.connect(transport);
-  console.error("sevdesk MCP server running on stdio");
+  console.error("sevDesk MCP server (Update 2.0 optimized) running on stdio");
 }
 
 main().catch((error) => {

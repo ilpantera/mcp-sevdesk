@@ -3,7 +3,8 @@ import type { SevdeskClient } from "../client.js";
 
 export const creditNoteTools = {
   list_credit_notes: {
-    description: "List all credit notes (Gutschriften) from sevdesk",
+    description:
+      "Read-only list of sevDesk credit notes. This tool stays low-level and does not expose deprecated taxType workflows.",
     inputSchema: z.object({
       status: z.enum(["100", "200", "1000"]).optional().describe("Credit note status: 100=Draft, 200=Open, 1000=Booked"),
       startDate: z.string().optional().describe("Filter by start date (Unix timestamp)"),
@@ -35,7 +36,7 @@ export const creditNoteTools = {
   },
 
   get_credit_note: {
-    description: "Get a specific credit note by ID from sevdesk",
+    description: "Read one sevDesk credit note by ID.",
     inputSchema: z.object({
       creditNoteId: z.number().describe("The ID of the credit note to retrieve"),
     }),
@@ -51,7 +52,7 @@ export const creditNoteTools = {
   },
 
   get_credit_note_pdf: {
-    description: "Get the PDF of a credit note as base64 encoded string",
+    description: "Read the PDF representation of a credit note.",
     inputSchema: z.object({
       creditNoteId: z.number().describe("The ID of the credit note"),
       download: z.boolean().optional().describe("Whether to download the PDF"),
@@ -74,7 +75,8 @@ export const creditNoteTools = {
   },
 
   send_credit_note_by_email: {
-    description: "Send a credit note via email",
+    description:
+      "Write tool that sends a credit note via email. In sevDesk Update 2.0 this can also trigger the corresponding status transition.",
     inputSchema: z.object({
       creditNoteId: z.number().describe("The ID of the credit note to send"),
       toEmail: z.string().describe("Recipient email address"),
@@ -112,7 +114,7 @@ export const creditNoteTools = {
   },
 
   book_credit_note: {
-    description: "Book a credit note (mark it as paid)",
+    description: "Write tool that books a credit note payment via sevDesk's dedicated payment endpoint.",
     inputSchema: z.object({
       creditNoteId: z.number().describe("The ID of the credit note to book"),
       amount: z.number().describe("Amount to book"),
