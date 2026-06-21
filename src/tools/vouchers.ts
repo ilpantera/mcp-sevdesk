@@ -285,6 +285,24 @@ export const voucherTools = {
     },
   },
 
+  delete_voucher_position: {
+    description:
+      "Deletes a single voucher position (line item) by ID. " +
+      "Use this to remove surplus positions after consolidating multiple positions " +
+      "into one per tax rate. Call update_voucher_position on the position to keep first, " +
+      "then delete all remaining ones.",
+    inputSchema: z.object({
+      voucherPosId: z.number().describe("The ID of the voucher position to delete"),
+    }),
+    handler: async (client: SevdeskClient, params: { voucherPosId: number }) => {
+      const { data, error } = await (client.DELETE as any)("/VoucherPos/{voucherPosId}", {
+        params: { path: { voucherPosId: params.voucherPosId } },
+      });
+      if (error) throw new Error(JSON.stringify(error));
+      return data ?? { success: true };
+    },
+  },
+
   list_vouchers_by_account: {
     description: "List voucher positions filtered by DATEV booking account (accountDatev). Useful for expense analysis by account.",
     inputSchema: z.object({
