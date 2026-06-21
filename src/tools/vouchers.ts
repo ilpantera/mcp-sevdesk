@@ -31,6 +31,49 @@ type UntypedClientMethodInit = {
 
 type UntypedClientMethodResult = Promise<{ data?: unknown; error?: unknown }>;
 
+export type VoucherPositionSummary = {
+  voucherPosIdToReuse?: number;
+  accountDatevId: number;
+  taxRate: number;
+  sumNet: number;
+  sumGross: number;
+  comment: string;
+};
+
+export type VoucherBookingPlanPosition = {
+  voucherPosIdToReuse?: number;
+  accountDatevId: number;
+  accountDatevObjectName?: "AccountDatev";
+  taxRate: number;
+  sumNet: number;
+  sumGross?: number;
+  comment: string;
+  isAsset?: boolean;
+  assetUsefulLife?: number;
+  specialAccountingField3?: string;
+  cateringTip?: number;
+};
+
+export type VoucherBookingPlan = {
+  voucherId: number;
+  supplierName?: string;
+  taxRuleId?: number;
+  voucherDate?: string;
+  expectedTotalGross?: number;
+  positions: VoucherBookingPlanPosition[];
+};
+
+type VoucherBookingPlanValidationResult = {
+  valid: boolean;
+  errors: string[];
+  warnings: string[];
+  normalizedPlan: VoucherBookingPlan;
+  computedTotals: {
+    totalGross: number;
+    totalNet: number;
+  };
+};
+
 function callUntypedClientMethod(
   client: SevdeskClient,
   method: "GET" | "DELETE",
@@ -130,6 +173,200 @@ function getVoucherDocumentId(voucherResponseData: VoucherResponseData | undefin
   const rawDocumentId = voucher?.document?.id;
   const documentId = Number(rawDocumentId);
   return Number.isFinite(documentId) ? documentId : undefined;
+}
+
+function getErrorMessage(error: unknown): string {
+  if (error instanceof Error) {
+    return error.message;
+  }
+  return String(error);
+}
+
+async function getVoucherByIdInternal(client: SevdeskClient, voucherId: number): Promise<unknown> {
+  const { data, error } = await client.GET("/Voucher/{voucherId}", {
+    params: {
+      path: { voucherId },
+    },
+  });
+  if (error) throw new Error(JSON.stringify(error));
+  return data;
+}
+
+async function getVoucherPositionsInternal(client: SevdeskClient, voucherId: number): Promise<unknown> {
+  const { data, error } = await client.GET("/VoucherPos", {
+    params: {
+      query: {
+        "voucher[id]": voucherId,
+        "voucher[objectName]": "Voucher",
+      } as any,
+    },
+  });
+  if (error) throw new Error(JSON.stringify(error));
+  return data;
+}
+
+async function getVoucherDocumentImageInternal(client: SevdeskClient, voucherId: number): Promise<unknown> {
+  const { data, error } = await (client.GET as any)(
+    "/Voucher/{voucherId}/getDocumentImage",
+    { params: { path: { voucherId } } }
+  );
+  if (error) throw new Error(JSON.stringify(error));
+  return data;
+}
+
+async function checkAndExtractEInvoiceInternal(client: SevdeskClient, voucherId: number): Promise<EInvoiceCheckResult> {
+  const voucherData = await getVoucherByIdInternal(client, voucherId);
+  const documentId = getVoucherDocumentId(voucherData as VoucherResponseData | undefined);
+  if (!documentId) {
+    return {
+      isEinvoice: false,
+      error: "Voucher has no document attached",
+    };
+  }
+
+  const { data: documentData, error: documentError } = await callUntypedClientMethod(
+    client,
+    "GET",
+    "/Document/{documentId}",
+    {
+      params: {
+        path: { documentId },
+      },
+      parseAs: "arrayBuffer",
+    }
+  );
+  if (documentError) throw new Error(JSON.stringify(documentError));
+  if (!(documentData instanceof ArrayBuffer)) {
+    throw new Error("Document download did not return raw bytes");
+  }
+
+  return extractEInvoiceData(Buffer.from(documentData));
+}
+
+export function roundCurrency(value: number): number {
+  const sign = Math.sign(value);
+  return sign * Math.round((Math.abs(value) + Number.EPSILON) * 100) / 100;
+}
+
+export function calculateGross(sumNet: number, taxRate: number): number {
+  if (taxRate === 19) return roundCurrency(sumNet * 1.19);
+  if (taxRate === 7) return roundCurrency(sumNet * 1.07);
+  if (taxRate === 0) return roundCurrency(sumNet);
+  return roundCurrency(sumNet * (1 + taxRate / 100));
+}
+
+export function normalizeBookingPlan(plan: VoucherBookingPlan): VoucherBookingPlan {
+  return {
+    ...plan,
+    expectedTotalGross:
+      plan.expectedTotalGross === undefined ? undefined : roundCurrency(plan.expectedTotalGross),
+    positions: plan.positions.map((position) => {
+      const sumNet = roundCurrency(position.sumNet);
+      const sumGross = position.sumGross === undefined
+        ? calculateGross(sumNet, position.taxRate)
+        : roundCurrency(position.sumGross);
+      return {
+        ...position,
+        accountDatevObjectName: position.accountDatevObjectName ?? "AccountDatev",
+        sumNet,
+        sumGross,
+      };
+    }),
+  };
+}
+
+export function validateBookingPlanInternal(plan: VoucherBookingPlan): VoucherBookingPlanValidationResult {
+  const normalizedPlan = normalizeBookingPlan(plan);
+  const errors: string[] = [];
+  const warnings: string[] = [];
+
+  if (!Number.isFinite(normalizedPlan.voucherId) || normalizedPlan.voucherId <= 0) {
+    errors.push("voucherId must be greater than 0");
+  }
+
+  if (normalizedPlan.positions.length === 0) {
+    errors.push("at least one position is required");
+  }
+
+  for (const [index, position] of normalizedPlan.positions.entries()) {
+    const label = `positions[${index}]`;
+    if (!Number.isFinite(position.accountDatevId) || position.accountDatevId <= 0) {
+      errors.push(`${label}.accountDatevId is required`);
+    }
+    if (!Number.isFinite(position.taxRate)) {
+      errors.push(`${label}.taxRate is required`);
+    }
+    if (!Number.isFinite(position.sumNet)) {
+      errors.push(`${label}.sumNet is required`);
+    }
+    if (typeof position.comment !== "string" || position.comment.trim().length === 0) {
+      errors.push(`${label}.comment is required`);
+    }
+    if (position.sumNet < 0) {
+      errors.push(`${label}.sumNet must not be negative`);
+    }
+    if (position.sumGross !== undefined && position.sumGross < 0) {
+      errors.push(`${label}.sumGross must not be negative`);
+    }
+
+    if (position.isAsset && (!Number.isFinite(position.assetUsefulLife) || (position.assetUsefulLife ?? 0) <= 0)) {
+      errors.push(`${label}.assetUsefulLife is required when isAsset is true`);
+    }
+
+    if (position.taxRate === 0) {
+      const specialCaseHint = /(trinkgeld|tip|steuerfrei|tax free|ohne\s*ust|reverse|porto|geb[uü]hr)/i;
+      if (!specialCaseHint.test(position.comment)) {
+        warnings.push(`${label} has taxRate 0 without an obvious special-case comment`);
+      }
+    }
+
+    if (
+      position.specialAccountingField3 !== undefined &&
+      position.specialAccountingField3.trim().length === 0
+    ) {
+      errors.push(`${label}.specialAccountingField3 must not be empty when provided`);
+    }
+
+    if (position.cateringTip !== undefined) {
+      if (!Number.isFinite(position.cateringTip)) {
+        errors.push(`${label}.cateringTip must be a finite number`);
+      } else if (position.cateringTip < 0) {
+        errors.push(`${label}.cateringTip must not be negative`);
+      } else if (position.sumGross !== undefined && position.cateringTip - position.sumGross > 0.01) {
+        warnings.push(`${label}.cateringTip is greater than sumGross`);
+      }
+    }
+  }
+
+  const totalNet = roundCurrency(
+    normalizedPlan.positions.reduce((accumulator, position) => accumulator + position.sumNet, 0)
+  );
+  const totalGross = roundCurrency(
+    normalizedPlan.positions.reduce(
+      (accumulator, position) => accumulator + (position.sumGross ?? calculateGross(position.sumNet, position.taxRate)),
+      0
+    )
+  );
+
+  if (normalizedPlan.expectedTotalGross !== undefined) {
+    const diff = Math.abs(totalGross - normalizedPlan.expectedTotalGross);
+    if (diff > 0.01) {
+      errors.push(
+        `expectedTotalGross mismatch: expected ${normalizedPlan.expectedTotalGross.toFixed(2)}, computed ${totalGross.toFixed(2)}`
+      );
+    }
+  }
+
+  return {
+    valid: errors.length === 0,
+    errors,
+    warnings,
+    normalizedPlan,
+    computedTotals: {
+      totalGross,
+      totalNet,
+    },
+  };
 }
 
 export const voucherTools = {
@@ -238,17 +475,27 @@ export const voucherTools = {
     inputSchema: z.object({
       voucherId: z.number().describe("The ID of the voucher"),
     }),
-    handler: async (client: SevdeskClient, params: { voucherId: number }) => {
-      const { data, error } = await client.GET("/VoucherPos", {
-        params: {
-          query: {
-            "voucher[id]": params.voucherId,
-            "voucher[objectName]": "Voucher",
-          } as any,
-        },
-      });
-      if (error) throw new Error(JSON.stringify(error));
-      return data;
+    handler: async (client: SevdeskClient, params: { voucherId: number }) =>
+      getVoucherPositionsInternal(client, params.voucherId),
+  },
+
+  get_voucher_positions_batch: {
+    description: "Get voucher positions for multiple vouchers in one call",
+    inputSchema: z.object({
+      voucherIds: z.array(z.number().int().positive()).min(1).max(100),
+    }),
+    handler: async (client: SevdeskClient, params: { voucherIds: number[] }) => {
+      const results = await Promise.all(
+        params.voucherIds.map(async (voucherId) => {
+          try {
+            const data = await getVoucherPositionsInternal(client, voucherId);
+            return { voucherId, ok: true, data };
+          } catch (error) {
+            return { voucherId, ok: false, error: getErrorMessage(error) };
+          }
+        })
+      );
+      return { results };
     },
   },
 
@@ -671,14 +918,8 @@ export const voucherTools = {
     inputSchema: z.object({
       voucherId: z.number().describe("The ID of the voucher"),
     }),
-    handler: async (client: SevdeskClient, params: { voucherId: number }) => {
-      const { data, error } = await (client.GET as any)(
-        "/Voucher/{voucherId}/getDocumentImage",
-        { params: { path: { voucherId: params.voucherId } } }
-      );
-      if (error) throw new Error(JSON.stringify(error));
-      return data;
-    },
+    handler: async (client: SevdeskClient, params: { voucherId: number }) =>
+      getVoucherDocumentImageInternal(client, params.voucherId),
   },
 
   check_and_extract_einvoice: {
@@ -687,39 +928,112 @@ export const voucherTools = {
     inputSchema: z.object({
       voucherId: z.number().describe("The ID of the voucher"),
     }),
-    handler: async (client: SevdeskClient, params: { voucherId: number }) => {
-      const { data: voucherData, error: voucherError } = await client.GET("/Voucher/{voucherId}", {
-        params: {
-          path: { voucherId: params.voucherId },
-        },
-      });
-      if (voucherError) throw new Error(JSON.stringify(voucherError));
+    handler: async (client: SevdeskClient, params: { voucherId: number }) =>
+      checkAndExtractEInvoiceInternal(client, params.voucherId),
+  },
 
-      const documentId = getVoucherDocumentId(voucherData);
-      if (!documentId) {
-        return {
-          isEinvoice: false,
-          error: "Voucher has no document attached",
-        };
-      }
-
-      const { data: documentData, error: documentError } = await callUntypedClientMethod(
-        client,
-        "GET",
-        "/Document/{documentId}",
-        {
-        params: {
-          path: { documentId },
-        },
-        parseAs: "arrayBuffer",
-        }
+  check_and_extract_einvoice_batch: {
+    description: "Check and extract e-invoice data for multiple vouchers",
+    inputSchema: z.object({
+      voucherIds: z.array(z.number().int().positive()).min(1).max(50),
+    }),
+    handler: async (client: SevdeskClient, params: { voucherIds: number[] }) => {
+      const results = await Promise.all(
+        params.voucherIds.map(async (voucherId) => {
+          try {
+            const data = await checkAndExtractEInvoiceInternal(client, voucherId);
+            return { voucherId, ok: true, data };
+          } catch (error) {
+            return { voucherId, ok: false, error: getErrorMessage(error) };
+          }
+        })
       );
-      if (documentError) throw new Error(JSON.stringify(documentError));
-      if (!(documentData instanceof ArrayBuffer)) {
-        throw new Error("Document download did not return raw bytes");
+      return { results };
+    },
+  },
+
+  get_voucher_booking_context: {
+    description: "Get voucher header, positions, e-invoice details and optional image in one call",
+    inputSchema: z.object({
+      voucherId: z.number().int().positive().describe("The ID of the voucher"),
+      includeImage: z.boolean().optional().describe("Include voucher image data"),
+    }),
+    handler: async (client: SevdeskClient, params: { voucherId: number; includeImage?: boolean }) => {
+      const voucher = await getVoucherByIdInternal(client, params.voucherId);
+      const positions = await getVoucherPositionsInternal(client, params.voucherId);
+
+      let einvoice: { ok: boolean; data?: EInvoiceCheckResult; error?: string };
+      try {
+        einvoice = { ok: true, data: await checkAndExtractEInvoiceInternal(client, params.voucherId) };
+      } catch (error) {
+        einvoice = { ok: false, error: getErrorMessage(error) };
       }
 
-      return extractEInvoiceData(Buffer.from(documentData));
+      let image: { ok: boolean; data?: unknown; error?: string } | null = null;
+      if (params.includeImage) {
+        try {
+          image = { ok: true, data: await getVoucherDocumentImageInternal(client, params.voucherId) };
+        } catch (error) {
+          image = { ok: false, error: getErrorMessage(error) };
+        }
+      }
+
+      return {
+        voucherId: params.voucherId,
+        voucher,
+        positions,
+        einvoice,
+        image,
+      };
     },
+  },
+
+  get_voucher_booking_context_batch: {
+    description: "Get booking context for multiple vouchers with per-voucher result status",
+    inputSchema: z.object({
+      voucherIds: z.array(z.number().int().positive()).min(1).max(50),
+      includeImage: z.boolean().optional(),
+    }),
+    handler: async (client: SevdeskClient, params: { voucherIds: number[]; includeImage?: boolean }) => {
+      const results = await Promise.all(
+        params.voucherIds.map(async (voucherId) => {
+          try {
+            const data = await voucherTools.get_voucher_booking_context.handler(client, {
+              voucherId,
+              includeImage: params.includeImage,
+            });
+            return { voucherId, ok: true, data };
+          } catch (error) {
+            return { voucherId, ok: false, error: getErrorMessage(error) };
+          }
+        })
+      );
+      return { results };
+    },
+  },
+
+  validate_voucher_booking_plan: {
+    description: "Validate and normalize a voucher booking plan without writing to sevdesk",
+    inputSchema: z.object({
+      voucherId: z.number().int().positive(),
+      supplierName: z.string().optional(),
+      taxRuleId: z.number().int().positive().optional(),
+      voucherDate: z.string().optional(),
+      expectedTotalGross: z.number().optional(),
+      positions: z.array(z.object({
+        voucherPosIdToReuse: z.number().int().positive().optional(),
+        accountDatevId: z.number().int().positive(),
+        accountDatevObjectName: z.literal("AccountDatev").optional(),
+        taxRate: z.number(),
+        sumNet: z.number(),
+        sumGross: z.number().optional(),
+        comment: z.string(),
+        isAsset: z.boolean().optional(),
+        assetUsefulLife: z.number().optional(),
+        specialAccountingField3: z.string().optional(),
+        cateringTip: z.number().optional(),
+      })).min(1),
+    }),
+    handler: async (_client: SevdeskClient, params: VoucherBookingPlan) => validateBookingPlanInternal(params),
   },
 };

@@ -86,7 +86,19 @@ SEVDESK_API_TOKEN="dein-token" npm start
 | `get_voucher` | Einzelnen Beleg abrufen |
 | `book_voucher` | Beleg als bezahlt buchen |
 | `get_voucher_positions` | Belegpositionen abrufen |
+| `get_voucher_positions_batch` | Positionen für mehrere Belege gesammelt abrufen |
 | `upload_voucher_file` | Belegdatei hochladen |
+| `update_voucher` | Beleg-Metadaten (Status, Steuerregel, Lieferant) aktualisieren |
+| `update_voucher_position` | Einzelne Belegposition gezielt aktualisieren |
+| `create_voucher_position` | Neue Belegposition an einen vorhandenen Beleg anhängen |
+| `delete_voucher_position` | Belegposition per ID löschen |
+| `get_voucher_document_image` | Belegbild als Dokumentdaten abrufen |
+| `check_and_extract_einvoice` | E-Rechnungsdaten (ZUGFeRD/XRechnung) aus Belegdokument prüfen/extrahieren |
+| `check_and_extract_einvoice_batch` | E-Rechnungsprüfung für mehrere Belege gesammelt ausführen |
+| `get_voucher_booking_context` | Header, Positionen, E-Rechnung und optional Bild in einem Aufruf laden |
+| `get_voucher_booking_context_batch` | Buchungskontext für mehrere Belege strukturiert abrufen |
+| `validate_voucher_booking_plan` | Buchungsplan lokal validieren/normalisieren ohne SevDesk-Schreibzugriff |
+| `get_receipt_guidance` | DATEV-Kontierungshilfe für Belege abrufen |
 
 ### Bankkonten
 
