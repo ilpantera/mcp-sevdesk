@@ -74,7 +74,7 @@ type VoucherBookingPlanValidationResult = {
   };
 };
 
-const ZERO_TAX_SPECIAL_CASE_COMMENT_PATTERN = /(trinkgeld|tip|steuerfrei|tax free|ohne\s*ust|reverse|porto|geb[uü]hr)/i;
+const ZERO_TAX_SPECIAL_CASE_COMMENT_PATTERN = /(trinkgeld|tip|steuerfrei|tax free|ohne\s*ust|reverse|porto|geb[üu]hr)/i;
 
 function callUntypedClientMethod(
   client: SevdeskClient,
@@ -383,7 +383,7 @@ export function validateBookingPlanInternal(plan: VoucherBookingPlan): VoucherBo
   );
   const totalGross = roundCurrency(
     normalizedPlan.positions.reduce(
-      (accumulator, position) => accumulator + (position.sumGross ?? calculateGross(position.sumNet, position.taxRate)),
+      (accumulator, position) => accumulator + position.sumGross!,
       0
     )
   );
