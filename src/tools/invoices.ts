@@ -1,6 +1,21 @@
 import { z } from "zod";
 import type { SevdeskClient } from "../client.js";
 
+function normalizeInvoiceDateFilter(value: string | undefined, fieldName: "startDate" | "endDate"): number | undefined {
+  if (value === undefined) return undefined;
+  const trimmed = value.trim();
+  if (/^\d+$/.test(trimmed)) {
+    return Number(trimmed);
+  }
+
+  // Date-only strings are normalized to midnight UTC so server-side filtering is deterministic.
+  const parsedMs = Date.parse(trimmed.includes("T") ? trimmed : `${trimmed}T00:00:00Z`); // date-only inputs are normalized to UTC midnight
+  if (Number.isNaN(parsedMs)) {
+    throw new Error(`${fieldName} must be a Unix timestamp string or ISO date string (YYYY-MM-DD)`);
+  }
+  return Math.floor(parsedMs / 1000);
+}
+
 export const invoiceTools = {
   list_invoices: {
     description:
@@ -8,8 +23,12 @@ export const invoiceTools = {
     inputSchema: z.object({
       status: z.enum(["100", "200", "1000"]).optional().describe("Invoice status: 100=Draft, 200=Open, 1000=Paid"),
       invoiceNumber: z.string().optional().describe("Filter by invoice number"),
-      startDate: z.string().optional().describe("Filter by start date (Unix timestamp)"),
-      endDate: z.string().optional().describe("Filter by end date (Unix timestamp)"),
+      startDate: z.string().optional().describe(
+        "Filter start date. Accepts Unix timestamp string or ISO date (YYYY-MM-DD); MCP normalizes ISO input to Unix seconds (ISO dates are interpreted as 00:00:00 UTC)."
+      ),
+      endDate: z.string().optional().describe(
+        "Filter end date. Accepts Unix timestamp string or ISO date (YYYY-MM-DD); MCP normalizes ISO input to Unix seconds (ISO dates are interpreted as 00:00:00 UTC)."
+      ),
       limit: z.number().optional().describe("Limit the number of results"),
       offset: z.number().optional().describe("Skip a number of results"),
     }),
@@ -26,8 +45,8 @@ export const invoiceTools = {
           query: {
             status: params.status ? Number(params.status) : undefined,
             invoiceNumber: params.invoiceNumber,
-            startDate: params.startDate ? Number(params.startDate) : undefined,
-            endDate: params.endDate ? Number(params.endDate) : undefined,
+            startDate: normalizeInvoiceDateFilter(params.startDate, "startDate"),
+            endDate: normalizeInvoiceDateFilter(params.endDate, "endDate"),
             limit: params.limit,
             offset: params.offset,
           } as any,
@@ -154,7 +173,9 @@ export const invoiceTools = {
     inputSchema: z.object({
       invoiceId: z.number().describe("The ID of the invoice to book"),
       amount: z.number().describe("Amount to book"),
-      date: z.string().describe("Booking date (Unix timestamp)"),
+      date: z.string().describe(
+        "Booking date passed through to sevDesk. Prefer YYYY-MM-DD; Unix timestamp strings are accepted when required by your sevDesk setup."
+      ),
       type: z.enum(["N", "CB", "CF", "O", "OF", "MF", "C"]).describe("Booking type: N=Normal, CB=Cash discount, etc."),
       checkAccountId: z.number().describe("ID of the check account"),
       checkAccountTransactionId: z.number().optional().describe("ID of an existing transaction to link"),

@@ -88,7 +88,7 @@ SEVDESK_API_TOKEN="dein-token" npm start
 |---|---|---|
 | `list_contacts` | read | Kontakte mit Filtern, inkl. optionaler Kategorie |
 | `list_supplier_contacts` | read | Lieferantenkontakte für Voucher-Workflows |
-| `find_contact_by_exact_or_alias_name` | read | Exakt-/Alias-Namenssuche für Supplier-Normalisierung |
+| `find_contact_by_exact_or_alias_name` | read | Exakt-/Alias-Namenssuche auf Basis des sevDesk-`name`-Resultsets |
 | `get_contact` / `create_contact` / `update_contact` / `delete_contact` | mixed | Basisoperationen für Kontakte |
 
 ### Parts / Artikel
@@ -134,7 +134,7 @@ Für moderne Eingangsbeleg-Workflows ist `apply_voucher_booking_plan` das zentra
   - `sumNet`
   - `sumGross?`
   - `comment`
-  - optional: `isAsset`, `assetUsefulLife`, `specialAccountingField3`, `cateringTip`
+  - optional: `isAsset`, `assetUsefulLife` (**Monate**), `specialAccountingField3`, `cateringTip`
 - optionale Ausführungsflags:
   - `dryRun`
   - `deleteSurplusPositions`
@@ -157,6 +157,7 @@ Für moderne Eingangsbeleg-Workflows ist `apply_voucher_booking_plan` das zentra
 - `validation`
 - `receiptGuidance`
 - `appliedChanges`
+- `writePhase` (started/completedSteps/failedAt/failedMessage)
 - `finalVoucher`
 - `finalPositions`
 - `warnings`
@@ -169,12 +170,18 @@ Der Validator ist bewusst konservativ:
 - Brutto-/Netto-/Steuersatz-Berechnung wird streng geprüft
 - `expectedTotalGross` muss zur Summe der Positionen passen
 - `accountDatevId` ist Pflicht
-- Anlageposition ohne `assetUsefulLife` ist ein Fehler
+- Anlageposition ohne `assetUsefulLife` in Monaten ist ein Fehler
 - 0%-Positionen ohne erkennbare Begründung erzeugen Warnings
 - Trinkgeld-/Bewirtungsfelder werden auf Plausibilität geprüft
 - Receipt Guidance kann unzulässige Konto-/TaxRule-/TaxRate-Kombinationen früh erkennen
 
 ## Fachliche Leitplanken
+
+### Datumsfelder & Formate
+
+- Header-Datumsfelder bei Vouchern (`voucherDate`, `payDate`, `deliveryDate`, `paymentDeadline`) werden an sevDesk durchgereicht. Empfohlen: `YYYY-MM-DD` oder `YYYY-MM-DDTHH:mm:ss`.
+- `book_voucher.date` und `book_invoice.date` werden ebenfalls durchgereicht. Empfohlen: `YYYY-MM-DD`; Unix-Timestamp-Strings sind nur für Setups gedacht, die sie explizit erwarten.
+- `list_invoices.startDate` / `list_invoices.endDate` akzeptieren Unix-Timestamp-Strings **oder** ISO-Datum (`YYYY-MM-DD`); ISO wird im MCP auf Unix-Sekunden normalisiert.
 
 ### `taxRule` statt `taxType`
 

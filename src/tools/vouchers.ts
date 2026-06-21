@@ -59,7 +59,9 @@ export type VoucherBookingPlanIssueCode =
   | "RECEIPT_GUIDANCE_TAX_RULE_NOT_ALLOWED"
   | "RECEIPT_GUIDANCE_TAX_RATE_NOT_ALLOWED"
   | "RECEIPT_GUIDANCE_TAX_RULE_AMBIGUOUS"
+  | "RECEIPT_GUIDANCE_UNKNOWN_TAX_RATE"
   | "VOUCHER_CONTEXT_READ_FAILED"
+  | "WRITE_PHASE_FAILED"
   | "EINVOICE_READ_FAILED"
   | "IMAGE_READ_FAILED"
   | "STATUS_CHANGE_NOT_SUPPORTED";
@@ -178,6 +180,14 @@ export type ApplyVoucherBookingPlanResult = {
     reusedPositionIds: number[];
     createdPositionIndexes: number[];
     deletedPositionIds: number[];
+  };
+  writePhase: {
+    started: boolean;
+    completedSteps: string[];
+    // Step identifier where a write failed (for example "updateVoucherPos:77").
+    failedAt?: string;
+    // Human-readable error message from the failed write step.
+    failedMessage?: string;
   };
   finalVoucher: unknown;
   finalPositions: unknown;
@@ -436,6 +446,7 @@ async function validateReceiptGuidanceForPlan(
     const errors: VoucherBookingPlanIssue[] = [];
     const warnings: VoucherBookingPlanIssue[] = [];
     const matches: ReceiptGuidanceValidationResult["matches"] = [];
+    const unknownTaxRateWarnings = new Set<string>();
 
     for (const [index, position] of validation.normalizedPlan.positions.entries()) {
       const accountEntry = guidance.find((entry) => entry.accountDatevId === position.accountDatevId);
@@ -453,6 +464,23 @@ async function validateReceiptGuidanceForPlan(
       }
 
       const allowedRules = Array.isArray(accountEntry.allowedTaxRules) ? accountEntry.allowedTaxRules : [];
+      for (const rule of allowedRules) {
+        for (const taxRateName of Array.isArray(rule.taxRates) ? rule.taxRates : []) {
+          if (RECEIPT_GUIDANCE_TAX_RATE_MAP[taxRateName] === undefined) {
+            const warningKey = `${position.accountDatevId}:${taxRateName}`;
+            if (!unknownTaxRateWarnings.has(warningKey)) {
+              unknownTaxRateWarnings.add(warningKey);
+              warnings.push(
+                createIssue(
+                  "RECEIPT_GUIDANCE_UNKNOWN_TAX_RATE",
+                  `ReceiptGuidance returned unknown tax rate symbol "${taxRateName}" for account ${position.accountDatevId}`,
+                  `${path}.taxRate`
+                )
+              );
+            }
+          }
+        }
+      }
       const taxRuleMatches = findMatchingTaxRules(
         allowedRules,
         validation.normalizedPlan.taxRuleId,
@@ -745,7 +773,7 @@ export function validateBookingPlanInternal(plan: VoucherBookingPlan): VoucherBo
       errors.push(
         createIssue(
           "ASSET_USEFUL_LIFE_REQUIRED",
-          `${label}.assetUsefulLife is required when isAsset is true`,
+          `${label}.assetUsefulLife (months) is required when isAsset is true`,
           `${label}.assetUsefulLife`
         )
       );
@@ -753,7 +781,7 @@ export function validateBookingPlanInternal(plan: VoucherBookingPlan): VoucherBo
       errors.push(
         createIssue(
           "ASSET_USEFUL_LIFE_INVALID",
-          `${label}.assetUsefulLife must be greater than 0 when provided`,
+          `${label}.assetUsefulLife (months) must be greater than 0 when provided`,
           `${label}.assetUsefulLife`
         )
       );
@@ -867,6 +895,10 @@ async function applyVoucherBookingPlanInternal(
   const receiptGuidance = await validateReceiptGuidanceForPlan(client, validation);
   const errors = [...validation.errors, ...receiptGuidance.errors];
   const warnings = [...validation.warnings, ...receiptGuidance.warnings];
+  const writePhase: ApplyVoucherBookingPlanResult["writePhase"] = {
+    started: false,
+    completedSteps: [],
+  };
 
   let currentVoucher: unknown;
   let currentPositions: unknown;
@@ -891,6 +923,7 @@ async function applyVoucherBookingPlanInternal(
         createdPositionIndexes: [],
         deletedPositionIds: [],
       },
+      writePhase,
       finalVoucher: null,
       finalPositions: [],
       warnings,
@@ -1008,6 +1041,7 @@ async function applyVoucherBookingPlanInternal(
         createdPositionIndexes,
         deletedPositionIds: deleteSurplusPositions ? deletedPositionIds : [],
       },
+      writePhase,
       finalVoucher: currentVoucher,
       finalPositions: currentPositions,
       warnings,
@@ -1037,70 +1071,122 @@ async function applyVoucherBookingPlanInternal(
   ];
 
   if (!dryRun) {
-    if (headerFieldsChanged.length > 0) {
-      const { error } = await (client.PUT as unknown as (
-        path: string,
-        init: UntypedClientMethodInit
-      ) => UntypedClientMethodResult)("/Voucher/{voucherId}", {
-        params: {
-          path: {
-            voucherId: params.voucherId,
-          },
-        },
-        body: headerBody,
-      });
-      if (error) throw new Error(JSON.stringify(error));
-    }
-
-    for (const action of positionsToUpdate) {
-      const body = buildVoucherPositionBody(action.position);
-
-      if (action.voucherPosId !== undefined) {
+    writePhase.started = true;
+    let currentStep = "start";
+    try {
+      if (headerFieldsChanged.length > 0) {
+        currentStep = "updateVoucherHeader";
         const { error } = await (client.PUT as unknown as (
           path: string,
           init: UntypedClientMethodInit
-        ) => UntypedClientMethodResult)("/VoucherPos/{voucherPosId}", {
+        ) => UntypedClientMethodResult)("/Voucher/{voucherId}", {
           params: {
             path: {
-              voucherPosId: action.voucherPosId,
+              voucherId: params.voucherId,
             },
           },
-          body,
+          body: headerBody,
         });
         if (error) throw new Error(JSON.stringify(error));
-        continue;
+        writePhase.completedSteps.push(currentStep);
       }
 
-      const { error } = await (client.POST as unknown as (
-        path: string,
-        init: UntypedClientMethodInit
-      ) => UntypedClientMethodResult)("/VoucherPos", {
-        body: {
-          objectName: "VoucherPos",
-          mapAll: true,
-          voucher: { id: params.voucherId, objectName: "Voucher" },
-          sequenceNumber: action.index + 1,
-          ...body,
+      for (const action of positionsToUpdate) {
+        const body = buildVoucherPositionBody(action.position);
+
+        if (action.voucherPosId !== undefined) {
+          currentStep = `updateVoucherPos:${action.voucherPosId}`;
+          const { error } = await (client.PUT as unknown as (
+            path: string,
+            init: UntypedClientMethodInit
+          ) => UntypedClientMethodResult)("/VoucherPos/{voucherPosId}", {
+            params: {
+              path: {
+                voucherPosId: action.voucherPosId,
+              },
+            },
+            body,
+          });
+          if (error) throw new Error(JSON.stringify(error));
+          writePhase.completedSteps.push(currentStep);
+          continue;
+        }
+
+        currentStep = `createVoucherPos:${action.index}`;
+        const { error } = await (client.POST as unknown as (
+          path: string,
+          init: UntypedClientMethodInit
+        ) => UntypedClientMethodResult)("/VoucherPos", {
+          body: {
+            objectName: "VoucherPos",
+            mapAll: true,
+            voucher: { id: params.voucherId, objectName: "Voucher" },
+            sequenceNumber: action.index + 1,
+            ...body,
+          },
+        });
+        if (error) throw new Error(JSON.stringify(error));
+        writePhase.completedSteps.push(currentStep);
+      }
+
+      if (deleteSurplusPositions) {
+        for (const voucherPosId of deletedPositionIds) {
+          currentStep = `deleteVoucherPos:${voucherPosId}`;
+          const { error } = await callUntypedClientMethod(client, "DELETE", "/VoucherPos/{voucherPosId}", {
+            params: {
+              path: {
+                voucherPosId,
+              },
+            },
+          });
+          if (error) throw new Error(JSON.stringify(error));
+          writePhase.completedSteps.push(currentStep);
+        }
+      }
+
+      currentStep = "refetchFinalState";
+      currentVoucher = await getVoucherByIdInternal(client, params.voucherId);
+      currentPositions = await getVoucherPositionsInternal(client, params.voucherId);
+      writePhase.completedSteps.push(currentStep);
+    } catch (error) {
+      writePhase.failedAt = currentStep;
+      writePhase.failedMessage = getErrorMessage(error);
+      try {
+        currentVoucher = await getVoucherByIdInternal(client, params.voucherId);
+      } catch {
+        currentVoucher = null;
+      }
+      try {
+        currentPositions = await getVoucherPositionsInternal(client, params.voucherId);
+      } catch {
+        currentPositions = [];
+      }
+      return {
+        ok: false,
+        dryRun,
+        validation,
+        receiptGuidance,
+        appliedChanges: {
+          dryRun,
+          headerUpdated: headerFieldsChanged.length > 0,
+          headerFieldsChanged,
+          reusedPositionIds,
+          createdPositionIndexes,
+          deletedPositionIds: deleteSurplusPositions ? deletedPositionIds : [],
         },
-      });
-      if (error) throw new Error(JSON.stringify(error));
+        writePhase,
+        finalVoucher: currentVoucher,
+        finalPositions: currentPositions,
+        warnings,
+        errors: [
+          ...errors,
+          createIssue(
+            "WRITE_PHASE_FAILED",
+            `Write phase failed at "${currentStep}": ${getErrorMessage(error)}`
+          ),
+        ],
+      };
     }
-
-    if (deleteSurplusPositions) {
-      for (const voucherPosId of deletedPositionIds) {
-        const { error } = await callUntypedClientMethod(client, "DELETE", "/VoucherPos/{voucherPosId}", {
-          params: {
-            path: {
-              voucherPosId,
-            },
-          },
-        });
-        if (error) throw new Error(JSON.stringify(error));
-      }
-    }
-
-    currentVoucher = await getVoucherByIdInternal(client, params.voucherId);
-    currentPositions = await getVoucherPositionsInternal(client, params.voucherId);
   }
 
   return {
@@ -1116,6 +1202,7 @@ async function applyVoucherBookingPlanInternal(
       createdPositionIndexes,
       deletedPositionIds: deleteSurplusPositions ? deletedPositionIds : [],
     },
+    writePhase,
     finalVoucher: dryRun ? predictedVoucher : currentVoucher,
     finalPositions: dryRun ? predictedPositions : currentPositions,
     warnings,
@@ -1183,7 +1270,9 @@ export const voucherTools = {
     inputSchema: z.object({
       voucherId: z.number().describe("The ID of the voucher to book"),
       amount: z.number().describe("Amount to book"),
-      date: z.string().describe("Booking date (Unix timestamp)"),
+      date: z.string().describe(
+        "Booking date passed through to sevDesk. Prefer YYYY-MM-DD; Unix timestamp strings are accepted when required by your sevDesk setup."
+      ),
       type: z.enum(["N", "CB", "CF", "O", "OF", "MF", "C"]).describe("Booking type: N=Normal, CB=Cash discount, etc."),
       checkAccountId: z.number().describe("ID of the check account"),
       checkAccountTransactionId: z.number().optional().describe("ID of an existing transaction to link"),
@@ -1306,18 +1395,22 @@ export const voucherTools = {
         objectName: z.literal("TaxRule"),
       }).optional().describe("Explicit sevDesk Update 2.0 taxRule. Do not use deprecated taxType."),
       deliveryDate: z.string().optional().describe(
-        "Delivery/service date in ISO format YYYY-MM-DDTHH:mm:ss"
+        "Delivery/service date passed through to sevDesk. Prefer YYYY-MM-DD or YYYY-MM-DDTHH:mm:ss."
       ),
       paymentDeadline: z.string().optional().describe(
-        "Payment deadline in ISO format YYYY-MM-DDTHH:mm:ss"
+        "Payment deadline passed through to sevDesk. Prefer YYYY-MM-DD or YYYY-MM-DDTHH:mm:ss."
       ),
       taxRate: z.number().optional().describe("Overall tax rate in percent"),
       creditDebit: z.enum(["C", "D"]).optional().describe("C=Credit, D=Debit"),
       description: z.string().optional().describe("Description/memo"),
       supplierId: z.number().optional().describe("Contact ID of the supplier"),
       supplierName: z.string().optional().describe("Supplier name (used when supplierId is not set)"),
-      voucherDate: z.string().optional().describe("Voucher date as Unix timestamp string"),
-      payDate: z.string().optional().describe("Payment date as Unix timestamp string"),
+      voucherDate: z.string().optional().describe(
+        "Voucher date passed through to sevDesk. Prefer YYYY-MM-DD or YYYY-MM-DDTHH:mm:ss."
+      ),
+      payDate: z.string().optional().describe(
+        "Payment date passed through to sevDesk. Prefer YYYY-MM-DD or YYYY-MM-DDTHH:mm:ss."
+      ),
     }).strict(),
     handler: async (client: SevdeskClient, params: {
       voucherId: number;
@@ -1600,7 +1693,7 @@ export const voucherTools = {
     description:
       "Create a new expense voucher with sevDesk Update 2.0 semantics. Pass an explicit taxRule when needed; no supplier-country tax heuristics are applied.",
     inputSchema: z.object({
-      voucherDate: z.string().describe("Voucher date ISO format YYYY-MM-DDTHH:mm:ss"),
+      voucherDate: z.string().describe("Voucher date. Prefer YYYY-MM-DD or YYYY-MM-DDTHH:mm:ss"),
       deliveryDate: z.string().optional(),
       paymentDeadline: z.string().optional(),
       description: z.string().optional().describe("Voucher number or description"),
@@ -1623,7 +1716,7 @@ export const voucherTools = {
         sumGross: z.number().optional(),
         comment: z.string().optional(),
         isAsset: z.boolean().optional(),
-        assetUsefulLife: z.number().optional(),
+        assetUsefulLife: z.number().optional().describe("Useful life in months for asset positions"),
         specialAccountingField3: z.string().optional(),
         cateringTip: z.number().optional(),
       })).describe("Line items"),
@@ -1687,7 +1780,7 @@ export const voucherTools = {
       sumGross: z.number().optional(),
       comment: z.string().optional().describe("e.g. 'Trinkgeld'"),
       isAsset: z.boolean().optional(),
-      assetUsefulLife: z.number().optional(),
+      assetUsefulLife: z.number().optional().describe("Useful life in months for asset positions"),
       specialAccountingField3: z.string().optional(),
       cateringTip: z.number().optional(),
     }),
@@ -1839,7 +1932,7 @@ export const voucherTools = {
       voucherId: z.number().int().positive(),
       supplierName: z.string().optional(),
       taxRuleId: z.number().int().positive().optional(),
-      voucherDate: z.string().optional(),
+      voucherDate: z.string().optional().describe("Optional voucher date update (prefer YYYY-MM-DD)"),
       description: z.string().optional(),
       expectedTotalGross: z.number().optional(),
       checkReceiptGuidance: z.boolean().optional(),
@@ -1852,7 +1945,7 @@ export const voucherTools = {
         sumGross: z.number().optional(),
         comment: z.string(),
         isAsset: z.boolean().optional(),
-        assetUsefulLife: z.number().optional(),
+        assetUsefulLife: z.number().optional().describe("Useful life in months for asset positions"),
         specialAccountingField3: z.string().optional(),
         cateringTip: z.number().optional(),
       })).min(1),
@@ -1888,7 +1981,7 @@ export const voucherTools = {
       voucherId: z.number().int().positive(),
       supplierName: z.string().optional().describe("Optional supplier name update for the voucher header"),
       taxRuleId: z.number().int().positive().optional().describe("Explicit sevDesk Update 2.0 taxRule ID"),
-      voucherDate: z.string().optional().describe("Optional voucher date update"),
+      voucherDate: z.string().optional().describe("Optional voucher date update (prefer YYYY-MM-DD)"),
       description: z.string().optional().describe("Optional voucher description update"),
       expectedTotalGross: z.number().describe("Expected gross total of all final positions"),
       dryRun: z.boolean().optional().describe("Validate and plan changes without writing anything"),
@@ -1904,7 +1997,7 @@ export const voucherTools = {
         sumGross: z.number().optional(),
         comment: z.string(),
         isAsset: z.boolean().optional(),
-        assetUsefulLife: z.number().optional(),
+        assetUsefulLife: z.number().optional().describe("Useful life in months for asset positions"),
         specialAccountingField3: z.string().optional(),
         cateringTip: z.number().optional(),
       })).min(1),
