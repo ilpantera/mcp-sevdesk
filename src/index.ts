@@ -9,6 +9,7 @@ import {
   McpError,
 } from "@modelcontextprotocol/sdk/types.js";
 import { z } from "zod";
+import { zodToJsonSchema } from "zod-to-json-schema";
 import { createSevdeskClient, type SevdeskClient } from "./client.js";
 import {
   contactTools,
@@ -67,7 +68,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
   const tools = Object.entries(allTools).map(([name, tool]) => ({
     name,
     description: tool.description,
-    inputSchema: zodToJsonSchema(tool.inputSchema),
+    inputSchema: zodToJsonSchema(tool.inputSchema, { target: "openApi3" }),
   }));
 
   return { tools };
@@ -90,6 +91,20 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
     // Execute the tool
     const result = await (tool.handler as any)(sevdeskClient, validatedArgs);
 
+    // Check for MCP image response
+    if (result && typeof result === "object" && result.__type === "mcp_image") {
+      return {
+        content: [
+          {
+            type: "image",
+            data: result.base64,
+            mimeType: result.mimeType,
+          },
+        ],
+      };
+    }
+
+    // Default text response
     return {
       content: [
         {
@@ -118,118 +133,6 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
     };
   }
 });
-
-// Convert Zod schema to JSON Schema
-function zodToJsonSchema(schema: z.ZodType): object {
-  const jsonSchema: Record<string, any> = {
-    type: "object",
-    properties: {},
-    required: [],
-  };
-
-  if (schema instanceof z.ZodObject) {
-    const shape = schema.shape;
-    for (const [key, value] of Object.entries(shape)) {
-      const zodValue = value as z.ZodType;
-      const propertySchema = zodTypeToJsonSchema(zodValue);
-      jsonSchema.properties[key] = propertySchema;
-
-      // Check if required
-      if (!(zodValue instanceof z.ZodOptional)) {
-        jsonSchema.required.push(key);
-      }
-    }
-  }
-
-  if (jsonSchema.required.length === 0) {
-    delete jsonSchema.required;
-  }
-
-  return jsonSchema;
-}
-
-function zodTypeToJsonSchema(zodType: z.ZodType): object {
-  // Handle optional types
-  if (zodType instanceof z.ZodOptional) {
-    return zodTypeToJsonSchema(zodType._def.innerType);
-  }
-
-  // Handle string
-  if (zodType instanceof z.ZodString) {
-    const schema: Record<string, any> = { type: "string" };
-    if (zodType.description) {
-      schema.description = zodType.description;
-    }
-    return schema;
-  }
-
-  // Handle number
-  if (zodType instanceof z.ZodNumber) {
-    const schema: Record<string, any> = { type: "number" };
-    if (zodType.description) {
-      schema.description = zodType.description;
-    }
-    return schema;
-  }
-
-  // Handle boolean
-  if (zodType instanceof z.ZodBoolean) {
-    const schema: Record<string, any> = { type: "boolean" };
-    if (zodType.description) {
-      schema.description = zodType.description;
-    }
-    return schema;
-  }
-
-  // Handle enum
-  if (zodType instanceof z.ZodEnum) {
-    const schema: Record<string, any> = {
-      type: "string",
-      enum: zodType._def.values,
-    };
-    if (zodType.description) {
-      schema.description = zodType.description;
-    }
-    return schema;
-  }
-
-  // Handle array
-  if (zodType instanceof z.ZodArray) {
-    const schema: Record<string, any> = {
-      type: "array",
-      items: zodTypeToJsonSchema(zodType._def.type),
-    };
-    if (zodType.description) {
-      schema.description = zodType.description;
-    }
-    return schema;
-  }
-
-  // Handle object
-  if (zodType instanceof z.ZodObject) {
-    const properties: Record<string, object> = {};
-    const required: string[] = [];
-    const shape = zodType.shape as Record<string, z.ZodType>;
-    for (const [key, value] of Object.entries(shape)) {
-      properties[key] = zodTypeToJsonSchema(value);
-      if (!(value instanceof z.ZodOptional)) {
-        required.push(key);
-      }
-    }
-    const schema: Record<string, unknown> = { type: "object", properties };
-    if (required.length > 0) schema.required = required;
-    if (zodType.description) schema.description = zodType.description;
-    return schema;
-  }
-
-  // Handle literal
-  if (zodType instanceof z.ZodLiteral) {
-    return { type: typeof zodType._def.value, enum: [zodType._def.value] };
-  }
-
-  // Default fallback
-  return { type: "string" };
-}
 
 // Start server
 async function main() {
