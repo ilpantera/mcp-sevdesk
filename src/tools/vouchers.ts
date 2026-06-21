@@ -9,6 +9,33 @@ type EInvoiceCheckResult = {
   error?: string;
 };
 
+type UntypedClientMethodInit = {
+  params?: {
+    path?: Record<string, unknown>;
+    query?: Record<string, unknown>;
+  };
+  body?: unknown;
+  parseAs?: "json" | "text" | "blob" | "arrayBuffer" | "stream";
+};
+
+type UntypedClientMethodResult = Promise<{ data?: unknown; error?: unknown }>;
+
+function callUntypedGet(client: SevdeskClient, path: string, init: UntypedClientMethodInit): UntypedClientMethodResult {
+  const getMethod = client.GET as unknown as (
+    path: string,
+    init: UntypedClientMethodInit
+  ) => UntypedClientMethodResult;
+  return getMethod(path, init);
+}
+
+function callUntypedDelete(client: SevdeskClient, path: string, init: UntypedClientMethodInit): UntypedClientMethodResult {
+  const deleteMethod = client.DELETE as unknown as (
+    path: string,
+    init: UntypedClientMethodInit
+  ) => UntypedClientMethodResult;
+  return deleteMethod(path, init);
+}
+
 function extractXmlCandidates(text: string): string[] {
   const patterns = [
     /<\?xml[\s\S]*?<\/(?:\w+:)?CrossIndustryInvoice>/gi,
@@ -90,8 +117,8 @@ function extractEInvoiceData(bytes: Buffer): EInvoiceCheckResult {
   };
 }
 
-function getVoucherDocumentId(voucherResponse: any): number | undefined {
-  const voucher = Array.isArray(voucherResponse?.objects) ? voucherResponse.objects[0] : voucherResponse;
+function getVoucherDocumentId(voucherResponseData: any): number | undefined {
+  const voucher = Array.isArray(voucherResponseData?.objects) ? voucherResponseData.objects[0] : voucherResponseData;
   const rawDocumentId = voucher?.document?.id;
   const documentId = Number(rawDocumentId);
   return Number.isFinite(documentId) ? documentId : undefined;
@@ -391,7 +418,7 @@ export const voucherTools = {
       voucherPosId: z.number().describe("The ID of the voucher position to delete"),
     }),
     handler: async (client: SevdeskClient, params: { voucherPosId: number }) => {
-      const { data, error } = await (client.DELETE as any)("/VoucherPos/{voucherPosId}", {
+      const { data, error } = await callUntypedDelete(client, "/VoucherPos/{voucherPosId}", {
         params: { path: { voucherPosId: params.voucherPosId } },
       });
       if (error) throw new Error(JSON.stringify(error));
@@ -668,13 +695,16 @@ export const voucherTools = {
         };
       }
 
-      const { data: documentData, error: documentError } = await (client.GET as any)("/Document/{documentId}", {
+      const { data: documentData, error: documentError } = await callUntypedGet(client, "/Document/{documentId}", {
         params: {
           path: { documentId },
         },
         parseAs: "arrayBuffer",
       });
       if (documentError) throw new Error(JSON.stringify(documentError));
+      if (!(documentData instanceof ArrayBuffer)) {
+        throw new Error("Document download did not return raw bytes");
+      }
 
       return extractEInvoiceData(Buffer.from(documentData));
     },
