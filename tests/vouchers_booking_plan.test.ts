@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import {
   calculateGross,
+  normalizeBookingPlan,
   roundCurrency,
   validateBookingPlanInternal,
   voucherTools,
@@ -19,6 +20,30 @@ describe("voucher booking plan helpers", () => {
     expect(calculateGross(100, 7)).toBe(107);
     expect(calculateGross(100, 0)).toBe(100);
     expect(calculateGross(100, 5)).toBe(105);
+  });
+
+  it("normalizeBookingPlan rounds amounts and defaults accountDatevObjectName", () => {
+    const normalized = normalizeBookingPlan({
+      voucherId: 10,
+      expectedTotalGross: 119.005,
+      positions: [
+        {
+          accountDatevId: 555,
+          taxRate: 19,
+          sumNet: 100.004,
+          comment: "Büromaterial",
+        },
+      ],
+    });
+
+    expect(normalized.expectedTotalGross).toBe(119.01);
+    expect(normalized.positions[0]).toEqual(
+      expect.objectContaining({
+        accountDatevObjectName: "AccountDatev",
+        sumNet: 100,
+        sumGross: 119,
+      })
+    );
   });
 
   it("validateBookingPlanInternal returns valid result for a valid plan", () => {
@@ -165,6 +190,31 @@ describe("voucher booking plan helpers", () => {
     );
   });
 
+  it("validateBookingPlanInternal warns for implausible cateringTip tax usage", () => {
+    const result = validateBookingPlanInternal({
+      voucherId: 10,
+      positions: [
+        {
+          accountDatevId: 555,
+          taxRate: 19,
+          sumNet: 10,
+          comment: "Bewirtung",
+          cateringTip: 3,
+        },
+      ],
+    });
+
+    expect(result.valid).toBe(true);
+    expect(result.warnings).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          code: "CATERING_TIP_TAX_REVIEW",
+          path: "positions[0].cateringTip",
+        }),
+      ])
+    );
+  });
+
   it("apply_voucher_booking_plan supports dryRun without mutating sevDesk", async () => {
     const GET = vi
       .fn()
@@ -236,6 +286,10 @@ describe("voucher booking plan helpers", () => {
     expect(result.dryRun).toBe(true);
     expect(result.appliedChanges.reusedPositionIds).toEqual([77]);
     expect(result.appliedChanges.createdPositionIndexes).toEqual([]);
+    expect(result.writePhase).toEqual({
+      started: false,
+      completedSteps: [],
+    });
     expect(GET).toHaveBeenCalledTimes(3);
     expect(PUT).not.toHaveBeenCalled();
     expect(POST).not.toHaveBeenCalled();
@@ -345,6 +399,92 @@ describe("voucher booking plan helpers", () => {
     );
   });
 
+  it("apply_voucher_booking_plan reports duplicate voucherPosIdToReuse", async () => {
+    const GET = vi
+      .fn()
+      .mockResolvedValueOnce({
+        data: {
+          objects: [
+            {
+              accountDatevId: 555,
+              allowedTaxRules: [{ id: 9, taxRates: ["NINETEEN"] }],
+            },
+          ],
+        },
+        error: undefined,
+      })
+      .mockResolvedValueOnce({
+        data: { objects: [{ id: 10 }] },
+        error: undefined,
+      })
+      .mockResolvedValueOnce({
+        data: { objects: [{ id: 77 }, { id: 88 }] },
+        error: undefined,
+      });
+
+    const result = await voucherTools.apply_voucher_booking_plan.handler(
+      { GET, PUT: vi.fn(), POST: vi.fn(), DELETE: vi.fn() } as unknown as SevdeskClient,
+      {
+        voucherId: 10,
+        expectedTotalGross: 238,
+        dryRun: true,
+        positions: [
+          { voucherPosIdToReuse: 77, accountDatevId: 555, taxRate: 19, sumNet: 100, comment: "A" },
+          { voucherPosIdToReuse: 77, accountDatevId: 555, taxRate: 19, sumNet: 100, comment: "B" },
+        ],
+      }
+    );
+
+    expect(result.ok).toBe(false);
+    expect(result.errors).toEqual(
+      expect.arrayContaining([expect.objectContaining({ code: "REUSED_POSITION_DUPLICATE" })])
+    );
+  });
+
+  it("apply_voucher_booking_plan warns for unknown ReceiptGuidance tax rate symbols", async () => {
+    const GET = vi
+      .fn()
+      .mockResolvedValueOnce({
+        data: {
+          objects: [
+            {
+              accountDatevId: 555,
+              allowedTaxRules: [{ id: 9, taxRates: ["SUPER_REDUCED", "NINETEEN"] }],
+            },
+          ],
+        },
+        error: undefined,
+      })
+      .mockResolvedValueOnce({
+        data: { objects: [{ id: 10 }] },
+        error: undefined,
+      })
+      .mockResolvedValueOnce({
+        data: { objects: [] },
+        error: undefined,
+      });
+
+    const result = await voucherTools.apply_voucher_booking_plan.handler(
+      { GET, PUT: vi.fn(), POST: vi.fn(), DELETE: vi.fn() } as unknown as SevdeskClient,
+      {
+        voucherId: 10,
+        expectedTotalGross: 238,
+        dryRun: true,
+        positions: [
+          { accountDatevId: 555, taxRate: 19, sumNet: 100, comment: "Büromaterial A" },
+          { accountDatevId: 555, taxRate: 19, sumNet: 100, comment: "Büromaterial B" },
+        ],
+      }
+    );
+
+    expect(result.ok).toBe(true);
+    expect(result.warnings).toEqual(
+      expect.arrayContaining([expect.objectContaining({ code: "RECEIPT_GUIDANCE_UNKNOWN_TAX_RATE" })])
+    );
+    // Ensure the unknown tax-rate warning is not duplicated for multiple matching positions.
+    expect(result.warnings.filter((warning) => warning.code === "RECEIPT_GUIDANCE_UNKNOWN_TAX_RATE")).toHaveLength(1);
+  });
+
   it("apply_voucher_booking_plan returns a structured voucher context read error", async () => {
     const GET = vi
       .fn()
@@ -387,5 +527,54 @@ describe("voucher booking plan helpers", () => {
         expect.objectContaining({ code: "VOUCHER_CONTEXT_READ_FAILED" }),
       ])
     );
+  });
+
+  it("apply_voucher_booking_plan returns writePhase and refetched state when write fails", async () => {
+    const GET = vi
+      .fn()
+      .mockResolvedValueOnce({
+        data: {
+          objects: [{ accountDatevId: 555, allowedTaxRules: [{ id: 9, taxRates: ["NINETEEN"] }] }],
+        },
+        error: undefined,
+      })
+      .mockResolvedValueOnce({
+        data: { objects: [{ id: 10, description: "Alt" }] },
+        error: undefined,
+      })
+      .mockResolvedValueOnce({
+        data: { objects: [{ id: 77 }] },
+        error: undefined,
+      })
+      .mockResolvedValueOnce({
+        data: { objects: [{ id: 10, description: "Nach Fehler" }] },
+        error: undefined,
+      })
+      .mockResolvedValueOnce({
+        data: { objects: [{ id: 77 }] },
+        error: undefined,
+      });
+    const PUT = vi
+      .fn()
+      .mockResolvedValueOnce({ data: { ok: true }, error: undefined })
+      .mockResolvedValueOnce({ data: undefined, error: { message: "voucher pos update failed" } });
+
+    const result = await voucherTools.apply_voucher_booking_plan.handler(
+      { GET, PUT, POST: vi.fn(), DELETE: vi.fn() } as unknown as SevdeskClient,
+      {
+        voucherId: 10,
+        expectedTotalGross: 119,
+        description: "Neu",
+        positions: [{ voucherPosIdToReuse: 77, accountDatevId: 555, taxRate: 19, sumNet: 100, comment: "Büro" }],
+      }
+    );
+
+    expect(result.ok).toBe(false);
+    expect(result.writePhase.started).toBe(true);
+    expect(result.writePhase.completedSteps).toContain("updateVoucherHeader");
+    expect(result.writePhase.failedAt).toBe("updateVoucherPos:77");
+    expect(result.errors).toEqual(expect.arrayContaining([expect.objectContaining({ code: "WRITE_PHASE_FAILED" })]));
+    expect(result.finalVoucher).toEqual(expect.objectContaining({ objects: [{ id: 10, description: "Nach Fehler" }] }));
+    expect(result.finalPositions).toEqual(expect.objectContaining({ objects: [{ id: 77 }] }));
   });
 });

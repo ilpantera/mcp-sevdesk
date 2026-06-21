@@ -201,7 +201,7 @@ export const contactTools = {
 
   find_contact_by_exact_or_alias_name: {
     description:
-      "Read-only helper for supplier/contact normalization. Returns exact matches first and keeps nearby candidates when names differ only slightly.",
+      "Read-only helper for supplier/contact normalization. Uses sevDesk's name filter as candidate source, then matches normalized name/name2/aliasName locally and returns exact matches first plus nearby candidates.",
     inputSchema: z.object({
       name: z.string().min(1).describe("Name to search for"),
       limit: z.number().optional().describe("Maximum candidates to inspect"),
