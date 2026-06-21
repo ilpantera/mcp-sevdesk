@@ -243,6 +243,45 @@ async function checkAndExtractEInvoiceInternal(client: SevdeskClient, voucherId:
   return extractEInvoiceData(Buffer.from(documentData));
 }
 
+async function getVoucherBookingContextInternal(
+  client: SevdeskClient,
+  voucherId: number,
+  includeImage?: boolean
+): Promise<{
+  voucherId: number;
+  voucher: unknown;
+  positions: unknown;
+  einvoice: { ok: boolean; data?: EInvoiceCheckResult; error?: string };
+  image: { ok: boolean; data?: unknown; error?: string } | null;
+}> {
+  const voucher = await getVoucherByIdInternal(client, voucherId);
+  const positions = await getVoucherPositionsInternal(client, voucherId);
+
+  let einvoice: { ok: boolean; data?: EInvoiceCheckResult; error?: string };
+  try {
+    einvoice = { ok: true, data: await checkAndExtractEInvoiceInternal(client, voucherId) };
+  } catch (error) {
+    einvoice = { ok: false, error: getErrorMessage(error) };
+  }
+
+  let image: { ok: boolean; data?: unknown; error?: string } | null = null;
+  if (includeImage) {
+    try {
+      image = { ok: true, data: await getVoucherDocumentImageInternal(client, voucherId) };
+    } catch (error) {
+      image = { ok: false, error: getErrorMessage(error) };
+    }
+  }
+
+  return {
+    voucherId,
+    voucher,
+    positions,
+    einvoice,
+    image,
+  };
+}
+
 export function roundCurrency(value: number): number {
   const sign = Math.sign(value);
   return sign * Math.round((Math.abs(value) + Number.EPSILON) * 100) / 100;
@@ -480,7 +519,7 @@ export const voucherTools = {
   },
 
   get_voucher_positions_batch: {
-    description: "Get voucher positions for multiple vouchers in one call",
+    description: "Get voucher positions for multiple vouchers in one call (max 100 IDs)",
     inputSchema: z.object({
       voucherIds: z.array(z.number().int().positive()).min(1).max(100),
     }),
@@ -958,34 +997,8 @@ export const voucherTools = {
       voucherId: z.number().int().positive().describe("The ID of the voucher"),
       includeImage: z.boolean().optional().describe("Include voucher image data"),
     }),
-    handler: async (client: SevdeskClient, params: { voucherId: number; includeImage?: boolean }) => {
-      const voucher = await getVoucherByIdInternal(client, params.voucherId);
-      const positions = await getVoucherPositionsInternal(client, params.voucherId);
-
-      let einvoice: { ok: boolean; data?: EInvoiceCheckResult; error?: string };
-      try {
-        einvoice = { ok: true, data: await checkAndExtractEInvoiceInternal(client, params.voucherId) };
-      } catch (error) {
-        einvoice = { ok: false, error: getErrorMessage(error) };
-      }
-
-      let image: { ok: boolean; data?: unknown; error?: string } | null = null;
-      if (params.includeImage) {
-        try {
-          image = { ok: true, data: await getVoucherDocumentImageInternal(client, params.voucherId) };
-        } catch (error) {
-          image = { ok: false, error: getErrorMessage(error) };
-        }
-      }
-
-      return {
-        voucherId: params.voucherId,
-        voucher,
-        positions,
-        einvoice,
-        image,
-      };
-    },
+    handler: async (client: SevdeskClient, params: { voucherId: number; includeImage?: boolean }) =>
+      getVoucherBookingContextInternal(client, params.voucherId, params.includeImage),
   },
 
   get_voucher_booking_context_batch: {
@@ -998,10 +1011,7 @@ export const voucherTools = {
       const results = await Promise.all(
         params.voucherIds.map(async (voucherId) => {
           try {
-            const data = await voucherTools.get_voucher_booking_context.handler(client, {
-              voucherId,
-              includeImage: params.includeImage,
-            });
+            const data = await getVoucherBookingContextInternal(client, voucherId, params.includeImage);
             return { voucherId, ok: true, data };
           } catch (error) {
             return { voucherId, ok: false, error: getErrorMessage(error) };
