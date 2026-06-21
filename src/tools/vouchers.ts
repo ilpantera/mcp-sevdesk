@@ -31,20 +31,17 @@ type UntypedClientMethodInit = {
 
 type UntypedClientMethodResult = Promise<{ data?: unknown; error?: unknown }>;
 
-function callUntypedGet(client: SevdeskClient, path: string, init: UntypedClientMethodInit): UntypedClientMethodResult {
-  const getMethod = client.GET as unknown as (
+function callUntypedClientMethod(
+  client: SevdeskClient,
+  method: "GET" | "DELETE",
+  path: string,
+  init: UntypedClientMethodInit
+): UntypedClientMethodResult {
+  const clientMethod = client[method] as unknown as (
     path: string,
     init: UntypedClientMethodInit
   ) => UntypedClientMethodResult;
-  return getMethod(path, init);
-}
-
-function callUntypedDelete(client: SevdeskClient, path: string, init: UntypedClientMethodInit): UntypedClientMethodResult {
-  const deleteMethod = client.DELETE as unknown as (
-    path: string,
-    init: UntypedClientMethodInit
-  ) => UntypedClientMethodResult;
-  return deleteMethod(path, init);
+  return clientMethod(path, init);
 }
 
 function extractXmlCandidates(text: string): string[] {
@@ -111,7 +108,7 @@ function extractEInvoiceData(bytes: Buffer): EInvoiceCheckResult {
     ])
   );
 
-  const xml = candidateXml.find((entry) => detectEInvoiceFormat(entry, isPdf)) ?? candidateXml[0];
+  const xml = candidateXml.find((entry) => detectEInvoiceFormat(entry, isPdf));
   const format = xml ? detectEInvoiceFormat(xml, isPdf) : undefined;
 
   if (!xml || !format) {
@@ -429,7 +426,7 @@ export const voucherTools = {
       voucherPosId: z.number().describe("The ID of the voucher position to delete"),
     }),
     handler: async (client: SevdeskClient, params: { voucherPosId: number }) => {
-      const { data, error } = await callUntypedDelete(client, "/VoucherPos/{voucherPosId}", {
+      const { data, error } = await callUntypedClientMethod(client, "DELETE", "/VoucherPos/{voucherPosId}", {
         params: { path: { voucherPosId: params.voucherPosId } },
       });
       if (error) throw new Error(JSON.stringify(error));
@@ -706,12 +703,17 @@ export const voucherTools = {
         };
       }
 
-      const { data: documentData, error: documentError } = await callUntypedGet(client, "/Document/{documentId}", {
+      const { data: documentData, error: documentError } = await callUntypedClientMethod(
+        client,
+        "GET",
+        "/Document/{documentId}",
+        {
         params: {
           path: { documentId },
         },
         parseAs: "arrayBuffer",
-      });
+        }
+      );
       if (documentError) throw new Error(JSON.stringify(documentError));
       if (!(documentData instanceof ArrayBuffer)) {
         throw new Error("Document download did not return raw bytes");
