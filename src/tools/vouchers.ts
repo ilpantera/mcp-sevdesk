@@ -9,6 +9,17 @@ type EInvoiceCheckResult = {
   error?: string;
 };
 
+type VoucherResponseData = {
+  objects?: Array<{
+    document?: {
+      id?: number | string | null;
+    } | null;
+  }>;
+  document?: {
+    id?: number | string | null;
+  } | null;
+};
+
 type UntypedClientMethodInit = {
   params?: {
     path?: Record<string, unknown>;
@@ -61,13 +72,13 @@ function extractEmbeddedPdfXmlCandidates(bytes: Buffer): string[] {
   for (const match of pdfText.matchAll(streamPattern)) {
     const objectText = match[0];
     const streamData = match[1];
+    const streamBuffer = Buffer.from(streamData, "latin1");
 
     try {
-      const streamBuffer = Buffer.from(streamData, "latin1");
       const decodedBuffer = /\/FlateDecode\b/.test(objectText) ? inflateSync(streamBuffer) : streamBuffer;
       xmlCandidates.push(...extractXmlCandidates(decodedBuffer.toString("utf8")));
     } catch {
-      // Ignore malformed or non-XML embedded streams.
+      xmlCandidates.push(...extractXmlCandidates(streamBuffer.toString("utf8")));
     }
   }
 
@@ -117,7 +128,7 @@ function extractEInvoiceData(bytes: Buffer): EInvoiceCheckResult {
   };
 }
 
-function getVoucherDocumentId(voucherResponseData: any): number | undefined {
+function getVoucherDocumentId(voucherResponseData: VoucherResponseData | undefined): number | undefined {
   const voucher = Array.isArray(voucherResponseData?.objects) ? voucherResponseData.objects[0] : voucherResponseData;
   const rawDocumentId = voucher?.document?.id;
   const documentId = Number(rawDocumentId);
