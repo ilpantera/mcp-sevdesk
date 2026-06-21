@@ -1,5 +1,136 @@
 import { z } from "zod";
+import { inflateSync } from "node:zlib";
 import type { SevdeskClient } from "../client.js";
+
+type EInvoiceCheckResult = {
+  isEinvoice: boolean;
+  format?: "ZUGFeRD" | "XRechnung";
+  data?: { xml: string };
+  error?: string;
+};
+
+type VoucherResponseData = {
+  objects?: Array<{
+    document?: {
+      id?: number | string | null;
+    } | null;
+  }>;
+  document?: {
+    id?: number | string | null;
+  } | null;
+};
+
+type UntypedClientMethodInit = {
+  params?: {
+    path?: Record<string, unknown>;
+    query?: Record<string, unknown>;
+  };
+  body?: unknown;
+  parseAs?: "json" | "text" | "blob" | "arrayBuffer" | "stream";
+};
+
+type UntypedClientMethodResult = Promise<{ data?: unknown; error?: unknown }>;
+
+function callUntypedClientMethod(
+  client: SevdeskClient,
+  method: "GET" | "DELETE",
+  path: string,
+  init: UntypedClientMethodInit
+): UntypedClientMethodResult {
+  const clientMethod = client[method] as unknown as (
+    path: string,
+    init: UntypedClientMethodInit
+  ) => UntypedClientMethodResult;
+  return clientMethod(path, init);
+}
+
+function extractXmlCandidates(text: string): string[] {
+  const patterns = [
+    /<\?xml[\s\S]*?<\/(?:\w+:)?CrossIndustryInvoice>/gi,
+    /<\?xml[\s\S]*?<\/(?:\w+:)?Invoice>/gi,
+    /<\?xml[\s\S]*?<\/(?:\w+:)?CreditNote>/gi,
+    /<(?:\w+:)?CrossIndustryInvoice\b[\s\S]*?<\/(?:\w+:)?CrossIndustryInvoice>/gi,
+    /<(?:\w+:)?Invoice\b[\s\S]*?<\/(?:\w+:)?Invoice>/gi,
+    /<(?:\w+:)?CreditNote\b[\s\S]*?<\/(?:\w+:)?CreditNote>/gi,
+  ];
+
+  return Array.from(
+    new Set(
+      patterns.flatMap((pattern) => Array.from(text.matchAll(pattern), (match) => match[0].trim()))
+    )
+  );
+}
+
+function extractEmbeddedPdfXmlCandidates(bytes: Buffer): string[] {
+  const pdfText = bytes.toString("latin1");
+  const streamPattern = /<<[\s\S]*?\/Type\s*\/EmbeddedFile[\s\S]*?stream\r?\n([\s\S]*?)\r?\nendstream/gi;
+  const xmlCandidates: string[] = [];
+
+  for (const match of pdfText.matchAll(streamPattern)) {
+    const objectText = match[0];
+    const streamData = match[1];
+    const streamBuffer = Buffer.from(streamData, "latin1");
+
+    try {
+      const decodedBuffer = /\/FlateDecode\b/.test(objectText) ? inflateSync(streamBuffer) : streamBuffer;
+      xmlCandidates.push(...extractXmlCandidates(decodedBuffer.toString("utf8")));
+    } catch {
+      xmlCandidates.push(...extractXmlCandidates(streamBuffer.toString("utf8")));
+    }
+  }
+
+  return Array.from(new Set(xmlCandidates));
+}
+
+function detectEInvoiceFormat(xml: string, isPdf: boolean): "ZUGFeRD" | "XRechnung" | undefined {
+  if (/(?:^|<)(?:\w+:)?CrossIndustryInvoice\b/i.test(xml)) {
+    return isPdf ? "ZUGFeRD" : "XRechnung";
+  }
+
+  if (
+    /(?:^|<)(?:\w+:)?(?:Invoice|CreditNote)\b/i.test(xml) ||
+    /urn:oasis:names:specification:ubl:schema:xsd:(?:Invoice|CreditNote)-2/i.test(xml)
+  ) {
+    return "XRechnung";
+  }
+
+  return undefined;
+}
+
+function extractEInvoiceData(bytes: Buffer): EInvoiceCheckResult {
+  const isPdf = bytes.subarray(0, 4).toString("ascii") === "%PDF";
+  const utf8Text = bytes.toString("utf8");
+  const candidateXml = Array.from(
+    new Set([
+      ...extractXmlCandidates(utf8Text),
+      ...(isPdf ? extractXmlCandidates(bytes.toString("latin1")) : []),
+      ...(isPdf ? extractEmbeddedPdfXmlCandidates(bytes) : []),
+    ])
+  );
+
+  const xml = candidateXml.find((entry) => detectEInvoiceFormat(entry, isPdf));
+  const format = xml ? detectEInvoiceFormat(xml, isPdf) : undefined;
+
+  if (!xml || !format) {
+    return {
+      isEinvoice: false,
+      error: "No ZUGFeRD/XRechnung XML found in voucher document",
+    };
+  }
+
+  return {
+    isEinvoice: true,
+    format,
+    data: { xml },
+  };
+}
+
+function getVoucherDocumentId(voucherResponseData: VoucherResponseData | undefined): number | undefined {
+  const voucher = Array.isArray(voucherResponseData?.objects) ? voucherResponseData.objects[0] : voucherResponseData;
+  const rawDocumentId = voucher?.document?.id;
+  const documentId = Number(rawDocumentId);
+  return Number.isFinite(documentId) ? documentId : undefined;
+}
 
 export const voucherTools = {
   list_vouchers: {
@@ -285,6 +416,24 @@ export const voucherTools = {
     },
   },
 
+  delete_voucher_position: {
+    description:
+      "Deletes a single voucher position (line item) by ID. " +
+      "Use this to remove surplus positions after consolidating multiple positions " +
+      "into one per tax rate. Call update_voucher_position on the position to keep first, " +
+      "then delete all remaining ones.",
+    inputSchema: z.object({
+      voucherPosId: z.number().describe("The ID of the voucher position to delete"),
+    }),
+    handler: async (client: SevdeskClient, params: { voucherPosId: number }) => {
+      const { data, error } = await callUntypedClientMethod(client, "DELETE", "/VoucherPos/{voucherPosId}", {
+        params: { path: { voucherPosId: params.voucherPosId } },
+      });
+      if (error) throw new Error(JSON.stringify(error));
+      return data ?? { success: true };
+    },
+  },
+
   list_vouchers_by_account: {
     description: "List voucher positions filtered by DATEV booking account (accountDatev). Useful for expense analysis by account.",
     inputSchema: z.object({
@@ -529,6 +678,48 @@ export const voucherTools = {
       );
       if (error) throw new Error(JSON.stringify(error));
       return data;
+    },
+  },
+
+  check_and_extract_einvoice: {
+    description:
+      "Checks whether a voucher document is a ZUGFeRD/XRechnung e-invoice and extracts its XML data internally.",
+    inputSchema: z.object({
+      voucherId: z.number().describe("The ID of the voucher"),
+    }),
+    handler: async (client: SevdeskClient, params: { voucherId: number }) => {
+      const { data: voucherData, error: voucherError } = await client.GET("/Voucher/{voucherId}", {
+        params: {
+          path: { voucherId: params.voucherId },
+        },
+      });
+      if (voucherError) throw new Error(JSON.stringify(voucherError));
+
+      const documentId = getVoucherDocumentId(voucherData);
+      if (!documentId) {
+        return {
+          isEinvoice: false,
+          error: "Voucher has no document attached",
+        };
+      }
+
+      const { data: documentData, error: documentError } = await callUntypedClientMethod(
+        client,
+        "GET",
+        "/Document/{documentId}",
+        {
+        params: {
+          path: { documentId },
+        },
+        parseAs: "arrayBuffer",
+        }
+      );
+      if (documentError) throw new Error(JSON.stringify(documentError));
+      if (!(documentData instanceof ArrayBuffer)) {
+        throw new Error("Document download did not return raw bytes");
+      }
+
+      return extractEInvoiceData(Buffer.from(documentData));
     },
   },
 };
