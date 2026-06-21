@@ -3,7 +3,8 @@ import type { SevdeskClient } from "../client.js";
 
 export const invoiceTools = {
   list_invoices: {
-    description: "List all invoices from sevdesk. Supports filtering and pagination.",
+    description:
+      "Read-only list of sevDesk invoices. This tool is intentionally low-level and does not model taxRule workflows directly.",
     inputSchema: z.object({
       status: z.enum(["100", "200", "1000"]).optional().describe("Invoice status: 100=Draft, 200=Open, 1000=Paid"),
       invoiceNumber: z.string().optional().describe("Filter by invoice number"),
@@ -38,7 +39,7 @@ export const invoiceTools = {
   },
 
   get_invoice: {
-    description: "Get a specific invoice by ID from sevdesk",
+    description: "Read one sevDesk invoice by ID.",
     inputSchema: z.object({
       invoiceId: z.number().describe("The ID of the invoice to retrieve"),
     }),
@@ -54,7 +55,7 @@ export const invoiceTools = {
   },
 
   get_invoice_pdf: {
-    description: "Get the PDF of an invoice as base64 encoded string",
+    description: "Read the PDF representation of an invoice.",
     inputSchema: z.object({
       invoiceId: z.number().describe("The ID of the invoice"),
       download: z.boolean().optional().describe("Whether to download the PDF"),
@@ -80,7 +81,8 @@ export const invoiceTools = {
   },
 
   send_invoice_by_email: {
-    description: "Send an invoice via email",
+    description:
+      "Write tool that sends an invoice via email. In sevDesk Update 2.0 this can also trigger the corresponding status transition.",
     inputSchema: z.object({
       invoiceId: z.number().describe("The ID of the invoice to send"),
       toEmail: z.string().describe("Recipient email address"),
@@ -121,7 +123,8 @@ export const invoiceTools = {
   },
 
   mark_invoice_as_sent: {
-    description: "Mark an invoice as sent",
+    description:
+      "Write tool that marks/sends an invoice via sevDesk's dedicated sendBy workflow. Use this instead of trying to set invoice status manually.",
     inputSchema: z.object({
       invoiceId: z.number().describe("The ID of the invoice"),
       sendType: z.enum(["VPR", "VPDF", "VM", "VP"]).optional().describe("Send type: VPR=Print, VPDF=PDF, VM=Email, VP=Post"),
@@ -147,7 +150,7 @@ export const invoiceTools = {
   },
 
   book_invoice: {
-    description: "Book an invoice (mark it as paid)",
+    description: "Write tool that books an invoice payment via sevDesk's dedicated payment endpoint.",
     inputSchema: z.object({
       invoiceId: z.number().describe("The ID of the invoice to book"),
       amount: z.number().describe("Amount to book"),
@@ -193,7 +196,7 @@ export const invoiceTools = {
   },
 
   cancel_invoice: {
-    description: "Cancel an invoice (creates a cancellation invoice)",
+    description: "Write tool that cancels an invoice by creating the appropriate cancellation document.",
     inputSchema: z.object({
       invoiceId: z.number().describe("The ID of the invoice to cancel"),
     }),

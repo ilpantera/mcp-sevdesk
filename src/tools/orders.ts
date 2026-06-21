@@ -3,7 +3,8 @@ import type { SevdeskClient } from "../client.js";
 
 export const orderTools = {
   list_orders: {
-    description: "List all orders from sevdesk",
+    description:
+      "Read-only list of sevDesk orders. This tool is intentionally low-level and does not attempt Update 2.0 taxRule orchestration.",
     inputSchema: z.object({
       status: z.enum(["100", "200", "300", "1000"]).optional().describe("Order status: 100=Draft, 200=Delivered, 300=Partially delivered, 1000=Completed"),
       orderNumber: z.string().optional().describe("Filter by order number"),
@@ -38,7 +39,7 @@ export const orderTools = {
   },
 
   get_order: {
-    description: "Get a specific order by ID from sevdesk",
+    description: "Read one sevDesk order by ID.",
     inputSchema: z.object({
       orderId: z.number().describe("The ID of the order to retrieve"),
     }),
@@ -54,7 +55,7 @@ export const orderTools = {
   },
 
   get_order_pdf: {
-    description: "Get the PDF of an order as base64 encoded string",
+    description: "Read the PDF representation of an order.",
     inputSchema: z.object({
       orderId: z.number().describe("The ID of the order"),
       download: z.boolean().optional().describe("Whether to download the PDF"),
@@ -77,7 +78,8 @@ export const orderTools = {
   },
 
   send_order_by_email: {
-    description: "Send an order via email",
+    description:
+      "Write tool that sends an order via email. Prefer sevDesk's dedicated send workflows over manual status assumptions.",
     inputSchema: z.object({
       orderId: z.number().describe("The ID of the order to send"),
       toEmail: z.string().describe("Recipient email address"),

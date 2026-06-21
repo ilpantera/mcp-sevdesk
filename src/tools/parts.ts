@@ -3,7 +3,8 @@ import type { SevdeskClient } from "../client.js";
 
 export const partTools = {
   list_parts: {
-    description: "List all parts (products/services) from sevdesk inventory",
+    description:
+      "Read-only lookup for sevDesk parts/articles. Useful for Update 2.0 sales and purchasing workflows before writing invoices or orders.",
     inputSchema: z.object({
       partNumber: z.string().optional().describe("Filter by part number"),
       name: z.string().optional().describe("Filter by part name"),
@@ -32,7 +33,7 @@ export const partTools = {
   },
 
   get_part: {
-    description: "Get a specific part by ID",
+    description: "Read one sevDesk part/article by ID.",
     inputSchema: z.object({
       partId: z.number().describe("The ID of the part to retrieve"),
     }),
@@ -48,16 +49,18 @@ export const partTools = {
   },
 
   create_part: {
-    description: "Create a new part (product/service) in sevdesk",
+    description:
+      "Create a sevDesk part/article. The tool accepts unitId as a convenience wrapper, writes the sevDesk unity object internally, and can store an optional long text description.",
     inputSchema: z.object({
       name: z.string().describe("Name of the part"),
       partNumber: z.string().optional().describe("Part number"),
       stock: z.number().optional().describe("Current stock quantity"),
       stockEnabled: z.boolean().optional().describe("Enable stock tracking"),
-      unitId: z.number().optional().describe("Unit ID (default: 1 for pieces)"),
-      priceGross: z.number().optional().describe("Gross price"),
-      priceNet: z.number().optional().describe("Net price"),
-      taxRate: z.number().optional().describe("Tax rate in percent (e.g., 19)"),
+      unitId: z.number().optional().describe("sevDesk unity ID (the API field is named unity)"),
+      priceGross: z.number().optional().describe("Gross sales price"),
+      priceNet: z.number().optional().describe("Net sales price"),
+      taxRate: z.number().optional().describe("Tax rate in percent (e.g. 19)"),
+      text: z.string().optional().describe("Optional long description"),
     }),
     handler: async (client: SevdeskClient, params: {
       name: string;
@@ -68,6 +71,7 @@ export const partTools = {
       priceGross?: number;
       priceNet?: number;
       taxRate?: number;
+      text?: string;
     }) => {
       const { data, error } = await client.POST("/Part", {
         body: {
@@ -81,6 +85,7 @@ export const partTools = {
           priceGross: params.priceGross?.toString(),
           priceNet: params.priceNet?.toString(),
           taxRate: params.taxRate?.toString(),
+          text: params.text,
         } as any,
       });
       if (error) throw new Error(JSON.stringify(error));
@@ -89,7 +94,8 @@ export const partTools = {
   },
 
   update_part: {
-    description: "Update an existing part in sevdesk",
+    description:
+      "Update an existing sevDesk part/article. Use unitId for the sevDesk unity object and numeric prices in normal decimal form.",
     inputSchema: z.object({
       partId: z.number().describe("The ID of the part to update"),
       name: z.string().optional().describe("Name of the part"),
@@ -105,7 +111,7 @@ export const partTools = {
       priceNet4: z.number().optional().describe("Fourth net price tier"),
       priceNet5: z.number().optional().describe("Fifth net price tier"),
       category: z.string().optional().describe("Product category name"),
-      unitId: z.number().optional().describe("Unit (Unity) ID"),
+      unitId: z.number().optional().describe("sevDesk unity ID (written to the unity field)"),
     }),
     handler: async (client: SevdeskClient, params: {
       partId: number;
@@ -153,7 +159,7 @@ export const partTools = {
   },
 
   get_part_stock: {
-    description: "Get the current stock of a part",
+    description: "Read the current stock level of a part/article.",
     inputSchema: z.object({
       partId: z.number().describe("The ID of the part"),
     }),
@@ -169,7 +175,7 @@ export const partTools = {
   },
 
   delete_part: {
-    description: "Delete a part (product/service) from sevdesk",
+    description: "Delete a sevDesk part/article.",
     inputSchema: z.object({
       partId: z.number().describe("The ID of the part to delete"),
     }),
@@ -181,6 +187,44 @@ export const partTools = {
       });
       if (error) throw new Error(JSON.stringify(error));
       return data;
+    },
+  },
+
+  find_part_by_number_or_name: {
+    description:
+      "Read-only helper for article lookup. Tries partNumber and name filters and returns both result sets in one response.",
+    inputSchema: z.object({
+      query: z.string().min(1).describe("Part number or part name"),
+      limit: z.number().optional().describe("Maximum results per lookup"),
+    }),
+    handler: async (client: SevdeskClient, params: { query: string; limit?: number }) => {
+      const [partNumberResult, nameResult] = await Promise.all([
+        client.GET("/Part", {
+          params: {
+            query: {
+              partNumber: params.query,
+              limit: params.limit ?? 20,
+            } as any,
+          },
+        }),
+        client.GET("/Part", {
+          params: {
+            query: {
+              name: params.query,
+              limit: params.limit ?? 20,
+            } as any,
+          },
+        }),
+      ]);
+
+      if (partNumberResult.error) throw new Error(JSON.stringify(partNumberResult.error));
+      if (nameResult.error) throw new Error(JSON.stringify(nameResult.error));
+
+      return {
+        query: params.query,
+        byPartNumber: partNumberResult.data,
+        byName: nameResult.data,
+      };
     },
   },
 };

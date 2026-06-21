@@ -1,14 +1,25 @@
 # mcp-sevdesk
 
-Ein MCP (Model Context Protocol) Server für die sevdesk API. Ermöglicht die Integration von sevdesk-Buchhaltungsfunktionen in Claude und andere MCP-kompatible Anwendungen.
+MCP-Server für sevDesk, optimiert für **sevDesk Update 2.0 / aktuelle OpenAPI**.
+Der Fokus liegt auf agent-tauglichen Buchhaltungsworkflows statt auf maximal generischen CRUD-Aufrufen.
 
-## Features
+## Positionierung
 
-- **Kontakte**: Erstellen, lesen, aktualisieren und löschen von Kontakten (Kunden, Lieferanten, Partner)
-- **Rechnungen**: Auflisten, abrufen, als PDF exportieren, per E-Mail versenden, buchen und stornieren
-- **Belege (Voucher)**: Verwalten von Eingangsrechnungen und Ausgaben
-- **Bankkonten**: Verwalten von Bankkonten und Transaktionen
-- **Artikel**: Verwalten von Produkten und Dienstleistungen
+- **Update-2.0-first**: High-Level-Flows orientieren sich an `taxRule`, Receipt Guidance und den aktuellen Status-Workflows.
+- **Keine v1-Workflow-Kompatibilität als Ziel**: alte `taxType`-/`taxSet`-Denke wird nicht mehr aktiv unterstützt.
+- **HTTP-Basis bleibt technisch** `https://my.sevdesk.de/api/v1`, obwohl das Verhalten fachlich auf Update 2.0 ausgerichtet ist.
+- sevDesk veröffentlicht die aktuellen Update-2.0-Funktionen weiterhin unter dieser `/api/v1`-Basis; dieses Repository richtet daher die Semantik auf Update 2.0 aus, ohne eine andere technische Base-URL zu erzwingen.
+- **Agent-freundlich**: Toolbeschreibungen markieren klar, ob ein Tool lesend, schreibend, low-level oder irreversibel ist.
+
+## Schwerpunkt-Workflows
+
+- Voucher / Eingangsbelege
+- Voucher-Positionen / Buchungskonten
+- Receipt Guidance
+- Kontakte / Lieferanten
+- Parts / Artikel
+- Bankkonten / Transaktionen
+- Rechnungen / Gutschriften / Orders (low-level, Update-2.0-konform beschrieben)
 
 ## Installation
 
@@ -20,19 +31,15 @@ npm run build
 
 ## Konfiguration
 
-Setze die Umgebungsvariable `SEVDESK_API_TOKEN` mit deinem sevdesk API-Token:
+Setze `SEVDESK_API_TOKEN`:
 
 ```bash
-export SEVDESK_API_TOKEN="dein-32-zeichen-hex-token"
+export SEVDESK_API_TOKEN="dein-token"
 ```
-
-Den API-Token findest du in sevdesk unter: Einstellungen → Benutzer → API-Token
 
 ## Verwendung
 
 ### Als MCP-Server
-
-Füge den Server zu deiner Claude Desktop Konfiguration hinzu (`~/.config/claude/claude_desktop_config.json`):
 
 ```json
 {
@@ -41,7 +48,7 @@ Füge den Server zu deiner Claude Desktop Konfiguration hinzu (`~/.config/claude
       "command": "node",
       "args": ["/pfad/zu/mcp-sevdesk/dist/index.js"],
       "env": {
-        "SEVDESK_API_TOKEN": "dein-api-token"
+        "SEVDESK_API_TOKEN": "dein-token"
       }
     }
   }
@@ -54,76 +61,160 @@ Füge den Server zu deiner Claude Desktop Konfiguration hinzu (`~/.config/claude
 SEVDESK_API_TOKEN="dein-token" npm start
 ```
 
-## Verfügbare Tools
+## Tool-Übersicht
+
+### Voucher / Receipt Guidance
+
+| Tool | Typ | Zweck |
+|---|---|---|
+| `get_voucher_positions_batch` | read | Strukturierte Batch-Abfrage für Belegpositionen |
+| `check_and_extract_einvoice_batch` | read | Batch-Prüfung für ZUGFeRD/XRechnung |
+| `get_voucher_booking_context` | read | Voucher-Header, Positionen, E-Invoice und optional Bild in einem Aufruf |
+| `get_voucher_booking_context_batch` | read | Strukturierte Batch-Variante des Booking Context |
+| `validate_voucher_booking_plan` | read | Strikte lokale Validierung eines Voucher-Buchungsplans, optional mit Receipt Guidance |
+| `apply_voucher_booking_plan` | write | Empfohlenes High-Level-Tool für konsistente Voucher-Buchung |
+| `get_receipt_guidance` | read | Erlaubte Konto-/TaxRule-/TaxRate-Kombinationen aus sevDesk |
+| `update_voucher` | write / low-level | Nur Header-Metadaten, **nicht** für Statuswechsel |
+| `reset_voucher_to_draft` | write | Status gezielt auf Draft zurücksetzen |
+| `reset_voucher_to_open` | write | Status gezielt auf Open zurücksetzen |
+| `enshrine_voucher` | write / irreversibel | Voucher rechtssicher festschreiben |
+| `update_voucher_position` | write / low-level | Einzelne Position direkt anpassen |
+| `create_voucher_position` | write / low-level | Einzelne Position direkt hinzufügen |
+| `delete_voucher_position` | write / low-level | Einzelne Position löschen |
 
 ### Kontakte
 
-| Tool | Beschreibung |
-|------|-------------|
-| `list_contacts` | Alle Kontakte auflisten |
-| `get_contact` | Einzelnen Kontakt abrufen |
-| `create_contact` | Neuen Kontakt erstellen |
-| `update_contact` | Kontakt aktualisieren |
-| `delete_contact` | Kontakt löschen |
+| Tool | Typ | Zweck |
+|---|---|---|
+| `list_contacts` | read | Kontakte mit Filtern, inkl. optionaler Kategorie |
+| `list_supplier_contacts` | read | Lieferantenkontakte für Voucher-Workflows |
+| `find_contact_by_exact_or_alias_name` | read | Exakt-/Alias-Namenssuche für Supplier-Normalisierung |
+| `get_contact` / `create_contact` / `update_contact` / `delete_contact` | mixed | Basisoperationen für Kontakte |
 
-### Rechnungen
+### Parts / Artikel
 
-| Tool | Beschreibung |
-|------|-------------|
-| `list_invoices` | Alle Rechnungen auflisten |
-| `get_invoice` | Einzelne Rechnung abrufen |
-| `get_invoice_pdf` | Rechnung als PDF abrufen |
-| `send_invoice_by_email` | Rechnung per E-Mail versenden |
-| `mark_invoice_as_sent` | Rechnung als versendet markieren |
-| `book_invoice` | Rechnung als bezahlt buchen |
-| `cancel_invoice` | Rechnung stornieren |
+| Tool | Typ | Zweck |
+|---|---|---|
+| `list_parts` / `get_part` | read | Artikel lesen |
+| `find_part_by_number_or_name` | read | Artikel-Lookup für Agenten |
+| `create_part` / `update_part` / `delete_part` | write | Artikel pflegen |
+| `get_part_stock` | read | Lagerbestand lesen |
 
-### Belege (Voucher)
+### Banking / Check Accounts
 
-| Tool | Beschreibung |
-|------|-------------|
-| `list_vouchers` | Alle Belege auflisten |
-| `get_voucher` | Einzelnen Beleg abrufen |
-| `book_voucher` | Beleg als bezahlt buchen |
-| `get_voucher_positions` | Belegpositionen abrufen |
-| `get_voucher_positions_batch` | Positionen für mehrere Belege gesammelt abrufen |
-| `upload_voucher_file` | Belegdatei hochladen |
-| `update_voucher` | Beleg-Metadaten (Status, Steuerregel, Lieferant) aktualisieren |
-| `update_voucher_position` | Einzelne Belegposition gezielt aktualisieren |
-| `create_voucher_position` | Neue Belegposition an einen vorhandenen Beleg anhängen |
-| `delete_voucher_position` | Belegposition per ID löschen |
-| `get_voucher_document_image` | Belegbild als Dokumentdaten abrufen |
-| `check_and_extract_einvoice` | E-Rechnungsdaten (ZUGFeRD/XRechnung) aus Belegdokument prüfen/extrahieren |
-| `check_and_extract_einvoice_batch` | E-Rechnungsprüfung für mehrere Belege gesammelt ausführen |
-| `get_voucher_booking_context` | Header, Positionen, E-Rechnung und optional Bild in einem Aufruf laden |
-| `get_voucher_booking_context_batch` | Buchungskontext für mehrere Belege strukturiert abrufen |
-| `validate_voucher_booking_plan` | Buchungsplan lokal validieren/normalisieren ohne SevDesk-Schreibzugriff |
-| `get_receipt_guidance` | DATEV-Kontierungshilfe für Belege abrufen |
+| Tool | Typ | Zweck |
+|---|---|---|
+| `list_check_accounts` / `get_check_account` / `get_check_account_balance` | read | Bank-/Kassenkonten lesen |
+| `list_transactions` / `get_transaction` | read | Transaktionen lesen |
+| `create_transaction` / `update_transaction` / `delete_transaction` | write | Transaktionen pflegen |
+| `enshrine_transaction` | write / irreversibel | Transaktion unwiderruflich festschreiben |
 
-### Bankkonten
+### Rechnungen / Gutschriften / Orders
 
-| Tool | Beschreibung |
-|------|-------------|
-| `list_check_accounts` | Alle Bankkonten auflisten |
-| `get_check_account` | Einzelnes Bankkonto abrufen |
-| `get_check_account_balance` | Kontostand abrufen |
-| `list_transactions` | Transaktionen auflisten |
-| `get_transaction` | Einzelne Transaktion abrufen |
-| `create_transaction` | Neue Transaktion erstellen |
+Diese Bereiche bleiben bewusst **low-level**. Für Update 2.0 werden Statuswechsel nicht über freie Statusfelder modelliert, sondern über sevDesk-spezifische Aktionen wie `send`, `book`, `cancel`.
 
-### Artikel
+### Sonstiges
 
-| Tool | Beschreibung |
-|------|-------------|
-| `list_parts` | Alle Artikel auflisten |
-| `get_part` | Einzelnen Artikel abrufen |
-| `create_part` | Neuen Artikel erstellen |
-| `update_part` | Artikel aktualisieren |
-| `get_part_stock` | Lagerbestand abrufen |
+- Tags
+- Reports
 
-## API-Referenz
+## Voucher-Booking-Plan (empfohlener Workflow)
 
-Dieser Server basiert auf der offiziellen sevdesk API v1. Weitere Informationen zur API findest du in der [sevdesk API-Dokumentation](https://api.sevdesk.de/).
+Für moderne Eingangsbeleg-Workflows ist `apply_voucher_booking_plan` das zentrale Tool.
+
+### Eingabe
+
+- `voucherId`
+- optionale Header-Felder: `supplierName`, `taxRuleId`, `voucherDate`, `description`
+- `expectedTotalGross`
+- `positions[]` mit mindestens:
+  - `voucherPosIdToReuse?`
+  - `accountDatevId`
+  - `taxRate`
+  - `sumNet`
+  - `sumGross?`
+  - `comment`
+  - optional: `isAsset`, `assetUsefulLife`, `specialAccountingField3`, `cateringTip`
+- optionale Ausführungsflags:
+  - `dryRun`
+  - `deleteSurplusPositions`
+
+### Verhalten
+
+1. aktuellen Voucher + Positionen laden
+2. Plan lokal validieren
+3. Receipt Guidance für den Belegbetrag prüfen
+4. Header-/Positionsänderungen planen
+5. Positionen wiederverwenden, anlegen und optional löschen
+6. Endzustand erneut lesen
+7. strukturiertes Ergebnis zurückgeben
+
+### Strukturierte Ergebnisse
+
+`apply_voucher_booking_plan` liefert u. a.:
+
+- `ok`
+- `validation`
+- `receiptGuidance`
+- `appliedChanges`
+- `finalVoucher`
+- `finalPositions`
+- `warnings`
+- `errors`
+
+## Validierungsregeln für Voucher-Pläne
+
+Der Validator ist bewusst konservativ:
+
+- Brutto-/Netto-/Steuersatz-Berechnung wird streng geprüft
+- `expectedTotalGross` muss zur Summe der Positionen passen
+- `accountDatevId` ist Pflicht
+- Anlageposition ohne `assetUsefulLife` ist ein Fehler
+- 0%-Positionen ohne erkennbare Begründung erzeugen Warnings
+- Trinkgeld-/Bewirtungsfelder werden auf Plausibilität geprüft
+- Receipt Guidance kann unzulässige Konto-/TaxRule-/TaxRate-Kombinationen früh erkennen
+
+## Fachliche Leitplanken
+
+### `taxRule` statt `taxType`
+
+- Für Update-2.0-Workflows soll `taxRule` explizit übergeben werden.
+- `taxType` und `taxSet` werden nicht mehr als primäre Agent-Eingaben empfohlen.
+- Grobe Heuristiken wie `supplierCountry -> taxRule` werden nicht mehr verwendet.
+
+### Receipt Guidance zuerst
+
+`get_receipt_guidance` bzw. die integrierte Receipt-Guidance-Prüfung helfen, ungültige Kombinationen vor dem Schreibversuch zu erkennen.
+
+### Statuslogik bei Vouchern
+
+- `update_voucher` ist **kein** generisches Status-Tool
+- nutze stattdessen:
+  - `reset_voucher_to_draft`
+  - `reset_voucher_to_open`
+  - `enshrine_voucher`
+  - `book_voucher`
+
+### Irreversible Aktionen
+
+Folgende Tools sind fachlich kritisch und nicht rückgängig zu machen:
+
+- `enshrine_voucher`
+- `enshrine_transaction`
+
+## Hinweise für Nutzer früherer Flows
+
+- Alte Flows mit `taxType` als primärer Agent-Eingabe sollten auf `taxRule` umgestellt werden.
+- `update_voucher` setzt keine Status mehr.
+- Supplier-Country-Steuerheuristiken wurden entfernt.
+- Für mehrstufige Voucher-Bearbeitung sollte `apply_voucher_booking_plan` statt loser Toolketten verwendet werden.
+
+## Entwicklung
+
+```bash
+npm test
+npm run build
+```
 
 ## Lizenz
 

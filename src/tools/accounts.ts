@@ -3,7 +3,7 @@ import type { SevdeskClient } from "../client.js";
 
 export const accountTools = {
   list_check_accounts: {
-    description: "List all check accounts (bank accounts) from sevdesk",
+    description: "Read-only list of sevDesk check accounts (bank / cash accounts).",
     inputSchema: z.object({
       limit: z.number().optional().describe("Limit the number of results"),
       offset: z.number().optional().describe("Skip a number of results"),
@@ -26,7 +26,7 @@ export const accountTools = {
   },
 
   get_check_account: {
-    description: "Get a specific check account by ID",
+    description: "Read one sevDesk check account by ID.",
     inputSchema: z.object({
       checkAccountId: z.number().describe("The ID of the check account"),
     }),
@@ -42,7 +42,8 @@ export const accountTools = {
   },
 
   get_check_account_balance: {
-    description: "Get the current balance of a check account",
+    description:
+      "Read the balance of a check account at a specific ISO date (YYYY-MM-DD).",
     inputSchema: z.object({
       checkAccountId: z.number().describe("The ID of the check account"),
       date: z.string().optional().describe("Date for the balance in ISO format YYYY-MM-DD. Default: today"),
@@ -65,11 +66,12 @@ export const accountTools = {
   },
 
   list_transactions: {
-    description: "List all transactions of a check account",
+    description:
+      "Read-only transaction list for a check account. valueDate is the effective bank date; entryDate is the booking/import date when available.",
     inputSchema: z.object({
       checkAccountId: z.number().describe("The ID of the check account"),
-      startDate: z.string().optional().describe("Filter by start date as ISO date-time string"),
-      endDate: z.string().optional().describe("Filter by end date as ISO date-time string"),
+      startDate: z.string().optional().describe("Filter by valueDate/entryDate window start (ISO date or date-time)"),
+      endDate: z.string().optional().describe("Filter by valueDate/entryDate window end (ISO date or date-time)"),
       paymtPurpose: z.string().optional().describe("Filter by payment purpose"),
       isBooked: z.boolean().optional().describe("Filter by booked status"),
       limit: z.number().optional().describe("Limit the number of results"),
@@ -104,7 +106,7 @@ export const accountTools = {
   },
 
   get_transaction: {
-    description: "Get a specific transaction by ID",
+    description: "Read one check account transaction by ID.",
     inputSchema: z.object({
       transactionId: z.number().describe("The ID of the transaction"),
     }),
@@ -120,12 +122,13 @@ export const accountTools = {
   },
 
   create_transaction: {
-    description: "Create a new transaction in a check account",
+    description:
+      "Create a new transaction in a check account. valueDate is the effective bank date; entryDate is the booking/import date if known.",
     inputSchema: z.object({
       checkAccountId: z.number().describe("The ID of the check account"),
       amount: z.number().describe("Transaction amount (positive for credit, negative for debit)"),
-      valueDate: z.string().describe("Value date (ISO date string YYYY-MM-DD)"),
-      entryDate: z.string().optional().describe("Entry date (ISO date string YYYY-MM-DD)"),
+      valueDate: z.string().describe("Value date (effective bank date, ISO YYYY-MM-DD)"),
+      entryDate: z.string().optional().describe("Entry/import date (ISO YYYY-MM-DD)"),
       paymtPurpose: z.string().optional().describe("Payment purpose/description"),
       payeePayerName: z.string().optional().describe("Name of payee or payer"),
       payeePayerAcctNo: z.string().optional().describe("Account number of payee/payer"),
@@ -164,12 +167,12 @@ export const accountTools = {
   update_transaction: {
     description:
       "Update an existing check account transaction (PUT /CheckAccountTransaction/{id}). " +
-      "Use to correct amount, date, purpose, or booking status of a transaction.",
+      "Use to correct amount, valueDate, entryDate, purpose, or status of a transaction.",
     inputSchema: z.object({
       transactionId: z.number().describe("ID of the transaction to update"),
       amount: z.number().optional().describe("Transaction amount (positive=credit, negative=debit)"),
       valueDate: z.string().optional().describe("Value date YYYY-MM-DD"),
-      entryDate: z.string().optional().describe("Entry date YYYY-MM-DD"),
+      entryDate: z.string().optional().describe("Entry/import date YYYY-MM-DD"),
       paymtPurpose: z.string().optional().describe("Payment purpose/description"),
       payeePayerName: z.string().optional().describe("Name of payee or payer"),
       payeePayerAcctNo: z.string().optional().describe("Account number of payee/payer"),
@@ -222,8 +225,8 @@ export const accountTools = {
 
   enshrine_transaction: {
     description:
-      "Enshrine a check account transaction (PUT /CheckAccountTransaction/{id}/enshrine). " +
-      "WARNING: This operation CANNOT be undone. Enshrined transactions cannot be changed.",
+      "Irreversible write tool: enshrine a check account transaction (PUT /CheckAccountTransaction/{id}/enshrine). " +
+      "Enshrined transactions cannot be changed and this operation cannot be undone.",
     inputSchema: z.object({
       transactionId: z.number().describe("ID of the transaction to enshrine"),
     }),
