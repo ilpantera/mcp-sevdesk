@@ -74,6 +74,8 @@ type VoucherBookingPlanValidationResult = {
   };
 };
 
+const ZERO_TAX_SPECIAL_CASE_COMMENT_PATTERN = /(trinkgeld|tip|steuerfrei|tax free|ohne\s*ust|reverse|porto|geb[uü]hr)/i;
+
 function callUntypedClientMethod(
   client: SevdeskClient,
   method: "GET" | "DELETE",
@@ -353,8 +355,7 @@ export function validateBookingPlanInternal(plan: VoucherBookingPlan): VoucherBo
     }
 
     if (position.taxRate === 0) {
-      const specialCaseHint = /(trinkgeld|tip|steuerfrei|tax free|ohne\s*ust|reverse|porto|geb[uü]hr)/i;
-      if (!specialCaseHint.test(position.comment)) {
+      if (!ZERO_TAX_SPECIAL_CASE_COMMENT_PATTERN.test(position.comment)) {
         warnings.push(`${label} has taxRate 0 without an obvious special-case comment`);
       }
     }
