@@ -766,22 +766,25 @@ export function validateBookingPlanInternal(plan: VoucherBookingPlan): VoucherBo
         errors.push(
           createIssue("CATERING_TIP_NEGATIVE", `${label}.cateringTip must not be negative`, `${label}.cateringTip`)
         );
-      } else if (position.taxRate !== 0) {
-        warnings.push(
-          createIssue(
-            "CATERING_TIP_TAX_REVIEW",
-            `${label}.cateringTip is set although the position tax rate is not 0%`,
-            `${label}.cateringTip`
-          )
-        );
-      } else if (position.sumGross !== undefined && position.cateringTip - position.sumGross > 0.01) {
-        warnings.push(
-          createIssue(
-            "CATERING_TIP_EXCEEDS_GROSS",
-            `${label}.cateringTip is greater than sumGross`,
-            `${label}.cateringTip`
-          )
-        );
+      } else {
+        if (position.taxRate !== 0) {
+          warnings.push(
+            createIssue(
+              "CATERING_TIP_TAX_REVIEW",
+              `${label}.cateringTip is set although the position tax rate is not 0%`,
+              `${label}.cateringTip`
+            )
+          );
+        }
+        if (position.sumGross !== undefined && position.cateringTip - position.sumGross > 0.01) {
+          warnings.push(
+            createIssue(
+              "CATERING_TIP_EXCEEDS_GROSS",
+              `${label}.cateringTip is greater than sumGross`,
+              `${label}.cateringTip`
+            )
+          );
+        }
       }
     }
   }

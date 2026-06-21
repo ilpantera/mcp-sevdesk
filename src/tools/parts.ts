@@ -50,7 +50,7 @@ export const partTools = {
 
   create_part: {
     description:
-      "Create a sevDesk part/article. The tool accepts unitId as a convenience wrapper and writes the sevDesk unity object internally.",
+      "Create a sevDesk part/article. The tool accepts unitId as a convenience wrapper, writes the sevDesk unity object internally, and can store an optional long text description.",
     inputSchema: z.object({
       name: z.string().describe("Name of the part"),
       partNumber: z.string().optional().describe("Part number"),
