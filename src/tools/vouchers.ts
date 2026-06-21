@@ -350,7 +350,9 @@ export function validateBookingPlanInternal(plan: VoucherBookingPlan): VoucherBo
       errors.push(`${label}.sumGross must not be negative`);
     }
 
-    if (position.isAsset && (!Number.isFinite(position.assetUsefulLife) || (position.assetUsefulLife ?? 0) <= 0)) {
+    const usefulLife = position.assetUsefulLife;
+    const hasValidUsefulLife = Number.isFinite(usefulLife) && (usefulLife as number) > 0;
+    if (position.isAsset && !hasValidUsefulLife) {
       errors.push(`${label}.assetUsefulLife is required when isAsset is true`);
     }
 
@@ -383,7 +385,8 @@ export function validateBookingPlanInternal(plan: VoucherBookingPlan): VoucherBo
   );
   const totalGross = roundCurrency(
     normalizedPlan.positions.reduce(
-      (accumulator, position) => accumulator + position.sumGross!,
+      (accumulator, position) =>
+        accumulator + (position.sumGross === undefined ? calculateGross(position.sumNet, position.taxRate) : position.sumGross),
       0
     )
   );
