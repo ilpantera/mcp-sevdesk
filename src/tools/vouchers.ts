@@ -58,6 +58,7 @@ export type VoucherBookingPlanIssueCode =
   | "RECEIPT_GUIDANCE_ACCOUNT_NOT_ALLOWED"
   | "RECEIPT_GUIDANCE_TAX_RULE_NOT_ALLOWED"
   | "RECEIPT_GUIDANCE_TAX_RATE_NOT_ALLOWED"
+  | "RECEIPT_GUIDANCE_TAX_RULE_AMBIGUOUS"
   | "VOUCHER_CONTEXT_READ_FAILED"
   | "EINVOICE_READ_FAILED"
   | "IMAGE_READ_FAILED"
@@ -185,6 +186,8 @@ export type ApplyVoucherBookingPlanResult = {
 };
 
 const ZERO_TAX_SPECIAL_CASE_COMMENT_PATTERN = /(trinkgeld|tip|steuerfrei|tax free|ohne\s*ust|reverse|porto|geb[üu]hr)/i;
+// ReceiptGuidance tax rates are emitted as symbolic values in the current sevDesk Update 2.0 API.
+// The mapping below mirrors the documented German VAT presets exposed by ReceiptGuidance.
 const RECEIPT_GUIDANCE_TAX_RATE_MAP: Record<string, number> = {
   ZERO: 0,
   SEVEN: 7,
@@ -462,6 +465,16 @@ async function validateReceiptGuidanceForPlan(
           )
         );
         continue;
+      }
+
+      if (validation.normalizedPlan.taxRuleId === undefined && taxRuleMatches.length > 1) {
+        warnings.push(
+          createIssue(
+            "RECEIPT_GUIDANCE_TAX_RULE_AMBIGUOUS",
+            `ReceiptGuidance allows multiple tax rules for account ${position.accountDatevId} at tax rate ${position.taxRate}%. Provide taxRuleId to remove ambiguity.`,
+            `${path}.taxRate`
+          )
+        );
       }
 
       const matchingRuleIds = taxRuleMatches
@@ -767,6 +780,8 @@ export function validateBookingPlanInternal(plan: VoucherBookingPlan): VoucherBo
           createIssue("CATERING_TIP_NEGATIVE", `${label}.cateringTip must not be negative`, `${label}.cateringTip`)
         );
       } else {
+        // sevDesk hospitality tips are typically 0%-positions. Non-zero tax rates are not rejected
+        // outright, but we surface a review warning so callers can confirm the accounting treatment.
         if (position.taxRate !== 0) {
           warnings.push(
             createIssue(

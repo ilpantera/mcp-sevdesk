@@ -8,6 +8,7 @@ Der Fokus liegt auf agent-tauglichen Buchhaltungsworkflows statt auf maximal gen
 - **Update-2.0-first**: High-Level-Flows orientieren sich an `taxRule`, Receipt Guidance und den aktuellen Status-Workflows.
 - **Keine v1-Workflow-Kompatibilität als Ziel**: alte `taxType`-/`taxSet`-Denke wird nicht mehr aktiv unterstützt.
 - **HTTP-Basis bleibt technisch** `https://my.sevdesk.de/api/v1`, obwohl das Verhalten fachlich auf Update 2.0 ausgerichtet ist.
+- sevDesk veröffentlicht die aktuellen Update-2.0-Funktionen weiterhin unter dieser `/api/v1`-Basis; dieses Repository richtet daher die Semantik auf Update 2.0 aus, ohne eine andere technische Base-URL zu erzwingen.
 - **Agent-freundlich**: Toolbeschreibungen markieren klar, ob ein Tool lesend, schreibend, low-level oder irreversibel ist.
 
 ## Schwerpunkt-Workflows
