@@ -3,7 +3,7 @@ import { inflateRawSync, inflateSync } from "node:zlib";
 import { constants as fsConstants, createReadStream } from "node:fs";
 import { access, open, stat } from "node:fs/promises";
 import { basename, isAbsolute } from "node:path";
-import FormData from "form-data";
+import NodeFormData from "form-data";
 import type { SevdeskClient } from "../client.js";
 
 type EInvoiceCheckResult = {
@@ -1255,7 +1255,7 @@ async function uploadVoucherFileFromPathInternal(
   originMimeType: string | null;
   contentHash: string | null;
 }> {
-  const form = new FormData();
+  const form = new NodeFormData();
   form.append("file", createReadStream(filePath), {
     filename: basename(filePath),
     contentType: "application/pdf",
