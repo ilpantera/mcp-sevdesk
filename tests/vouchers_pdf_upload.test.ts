@@ -1,5 +1,6 @@
-import { describe, expect, it, vi } from "vitest";
-import { readFileSync } from "node:fs";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { voucherTools } from "../src/tools/vouchers.js";
@@ -7,15 +8,38 @@ import type { SevdeskClient } from "../src/client.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const samplePdfBase64 = readFileSync(join(__dirname, "fixtures/sample-text.pdf")).toString("base64");
+const samplePdfBytes = readFileSync(join(__dirname, "fixtures/sample-text.pdf"));
 
 function createMockClient(overrides: Partial<SevdeskClient> = {}) {
   return {
     GET: vi.fn(),
     POST: vi.fn(),
     PUT: vi.fn(),
+    baseUrl: "https://my.sevdesk.de/api/v1",
+    defaultHeaders: {
+      Authorization: "test-token",
+      Accept: "application/json",
+    },
     ...overrides,
   } as unknown as SevdeskClient;
 }
+
+const tempDirectories: string[] = [];
+
+function createTempUploadFile(fileName: string, bytes: Buffer): string {
+  const directory = mkdtempSync(join(tmpdir(), "mcp-sevdesk-upload-"));
+  tempDirectories.push(directory);
+  const filePath = join(directory, fileName);
+  writeFileSync(filePath, bytes);
+  return filePath;
+}
+
+afterEach(() => {
+  vi.restoreAllMocks();
+  for (const directory of tempDirectories.splice(0)) {
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
 
 describe("create_draft_voucher", () => {
   it("creates a draft voucher first and verifies it can be re-read", async () => {
@@ -317,6 +341,108 @@ describe("create_voucher_from_pdf", () => {
     expect(result.ok).toBe(false);
     expect(result.errors[0].code).toBe("PDF_NOT_VALID");
     expect((client.POST as ReturnType<typeof vi.fn>)).not.toHaveBeenCalled();
+  });
+});
+
+describe("upload_voucher_file", () => {
+  it("uploads a local PDF via multipart form-data and returns the temp filename metadata", async () => {
+    const filePath = createTempUploadFile("receipt.pdf", samplePdfBytes);
+    const fetchMock = vi.fn().mockResolvedValueOnce(
+      new Response(
+        JSON.stringify({
+          objects: {
+            filename: "temp-uploaded-hash.pdf",
+            pages: 1,
+            originMimeType: "application/pdf",
+            contentHash: "sha256:abc123",
+          },
+        }),
+        { status: 201, headers: { "content-type": "application/json" } }
+      )
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    const result = await voucherTools.upload_voucher_file.handler(createMockClient(), { filePath });
+
+    expect(result).toEqual({
+      ok: true,
+      filePath,
+      filename: "temp-uploaded-hash.pdf",
+      pages: 1,
+      originMimeType: "application/pdf",
+      contentHash: "sha256:abc123",
+      warnings: [],
+      errors: [],
+    });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(fetchMock).toHaveBeenCalledWith(
+      "https://my.sevdesk.de/api/v1/Voucher/Factory/uploadTempFile",
+      expect.objectContaining({
+        method: "POST",
+        headers: expect.objectContaining({
+          Authorization: "test-token",
+          Accept: "application/json",
+        }),
+        body: expect.anything(),
+      })
+    );
+  });
+
+  it("returns FILE_NOT_FOUND without sending a request", async () => {
+    const fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+    const filePath = join(tmpdir(), "mcp-sevdesk-missing", "missing.pdf");
+
+    const result = await voucherTools.upload_voucher_file.handler(createMockClient(), { filePath });
+
+    expect(result.ok).toBe(false);
+    expect(result.errors).toEqual([expect.objectContaining({ code: "FILE_NOT_FOUND" })]);
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("rejects non-PDF files before any request is sent", async () => {
+    const fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+    const filePath = createTempUploadFile("not-a-pdf.txt", Buffer.from("plain text data"));
+
+    const result = await voucherTools.upload_voucher_file.handler(createMockClient(), { filePath });
+
+    expect(result.ok).toBe(false);
+    expect(result.errors).toEqual([expect.objectContaining({ code: "FILE_NOT_PDF" })]);
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("returns UPLOAD_FAILED with status and body when sevDesk rejects the upload", async () => {
+    const filePath = createTempUploadFile("receipt.pdf", samplePdfBytes);
+    const fetchMock = vi.fn().mockResolvedValueOnce(new Response("upload exploded", { status: 500, statusText: "Server Error" }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    const result = await voucherTools.upload_voucher_file.handler(createMockClient(), { filePath });
+
+    expect(result.ok).toBe(false);
+    expect(result.errors).toEqual([
+      expect.objectContaining({
+        code: "UPLOAD_FAILED",
+        message: expect.stringContaining("500 Server Error"),
+      }),
+    ]);
+    expect(result.errors[0]?.message).toContain("upload exploded");
+  });
+
+  it("returns UPLOAD_RESPONSE_INVALID when sevDesk omits objects.filename", async () => {
+    const filePath = createTempUploadFile("receipt.pdf", samplePdfBytes);
+    const fetchMock = vi.fn().mockResolvedValueOnce(
+      new Response(JSON.stringify({ objects: { pages: 1 } }), {
+        status: 201,
+        headers: { "content-type": "application/json" },
+      })
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    const result = await voucherTools.upload_voucher_file.handler(createMockClient(), { filePath });
+
+    expect(result.ok).toBe(false);
+    expect(result.errors).toEqual([expect.objectContaining({ code: "UPLOAD_RESPONSE_INVALID" })]);
   });
 });
 

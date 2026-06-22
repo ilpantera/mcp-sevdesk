@@ -76,6 +76,7 @@ SEVDESK_API_TOKEN="dein-token" npm start
 | `get_voucher_original_pdf` | read | Liefert das Original-PDF eines Belegs als Base64-Payload (primär via `GET /Export/voucherZip`, deterministisch gemappt) |
 | `get_voucher_original_pdf_batch` | read | Batch-Variante von `get_voucher_original_pdf` für bis zu 20 Belege |
 | `create_draft_voucher` | write | Erstellt einen neuen sevDesk-Entwurfsbeleg und verifiziert, dass er direkt wieder lesbar ist |
+| `upload_voucher_file` | write | Lädt eine lokale PDF-Datei per `multipart/form-data` nach sevDesk hoch und liefert den Temp-File-`filename`-Hash für spätere Voucher-Flows zurück |
 | `attach_pdf_to_voucher` | write | Hängt ein hochgeladenes PDF an einen bestehenden Beleg an (multipart Upload + Sichtbarkeitsprüfung) |
 | `create_voucher_from_pdf` | write | Komfort-Workflow: erstellt zuerst den Entwurfsbeleg, prüft ihn und hängt erst danach das hochgeladene PDF an |
 | `validate_voucher_booking_plan` | read | Strikte lokale Validierung eines Voucher-Buchungsplans, optional mit Receipt Guidance |

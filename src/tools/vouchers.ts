@@ -1,5 +1,9 @@
 import { z } from "zod";
 import { inflateRawSync, inflateSync } from "node:zlib";
+import { constants as fsConstants, createReadStream } from "node:fs";
+import { access, open, stat } from "node:fs/promises";
+import { basename, isAbsolute } from "node:path";
+import FormData from "form-data";
 import type { SevdeskClient } from "../client.js";
 
 type EInvoiceCheckResult = {
@@ -79,6 +83,14 @@ export type VoucherBookingPlanIssueCode =
   | "PDF_PAYLOAD_MISSING"
   | "PDF_BASE64_INVALID"
   | "PDF_NOT_VALID"
+  | "FILE_PATH_REQUIRED"
+  | "FILE_PATH_NOT_ABSOLUTE"
+  | "FILE_NOT_FOUND"
+  | "FILE_NOT_READABLE"
+  | "FILE_EMPTY"
+  | "FILE_NOT_PDF"
+  | "UPLOAD_FAILED"
+  | "UPLOAD_RESPONSE_INVALID"
   | "PDF_UPLOAD_FAILED"
   | "PDF_ATTACH_FAILED"
   | "PDF_ATTACH_VERIFY_FAILED"
@@ -105,6 +117,16 @@ class VoucherPdfRetrievalError extends Error {
   ) {
     super(message);
     this.name = "VoucherPdfRetrievalError";
+  }
+}
+
+class VoucherUploadError extends Error {
+  constructor(
+    public readonly code: VoucherBookingPlanIssueCode,
+    message: string
+  ) {
+    super(message);
+    this.name = "VoucherUploadError";
   }
 }
 
@@ -219,6 +241,17 @@ type AttachPdfToVoucherResult = {
   voucherId: number;
   documentId: number | null;
   fileName: string;
+  warnings: string[];
+  errors: VoucherBookingPlanIssue[];
+};
+
+type UploadVoucherFileResult = {
+  ok: boolean;
+  filePath: string;
+  filename: string | null;
+  pages: number | null;
+  originMimeType: string | null;
+  contentHash: string | null;
   warnings: string[];
   errors: VoucherBookingPlanIssue[];
 };
@@ -1128,6 +1161,158 @@ function validatePdfPayload(
   }
 
   return { fileName: trimmedFileName, normalizedBase64, decodedBytes };
+}
+
+function buildUploadVoucherFileFailure(
+  filePath: string,
+  code: VoucherBookingPlanIssueCode,
+  message: string
+): UploadVoucherFileResult {
+  return {
+    ok: false,
+    filePath,
+    filename: null,
+    pages: null,
+    originMimeType: null,
+    contentHash: null,
+    warnings: [],
+    errors: [createIssue(code, message)],
+  };
+}
+
+async function validateVoucherUploadFilePath(
+  filePath: string
+): Promise<{ filePath: string }> {
+  if (!filePath.trim()) {
+    throw new VoucherUploadError("FILE_PATH_REQUIRED", "filePath is required");
+  }
+  if (!isAbsolute(filePath)) {
+    throw new VoucherUploadError("FILE_PATH_NOT_ABSOLUTE", "filePath must be an absolute path");
+  }
+
+  let fileStats;
+  try {
+    fileStats = await stat(filePath);
+  } catch (error) {
+    const errorCode = asRecord(error)?.code;
+    if (errorCode === "ENOENT") {
+      throw new VoucherUploadError("FILE_NOT_FOUND", `File not found: ${filePath}`);
+    }
+    throw new VoucherUploadError("FILE_NOT_READABLE", `File could not be accessed: ${filePath}`);
+  }
+
+  if (!fileStats.isFile()) {
+    throw new VoucherUploadError("FILE_NOT_READABLE", `Path is not a readable file: ${filePath}`);
+  }
+
+  try {
+    await access(filePath, fsConstants.R_OK);
+  } catch {
+    throw new VoucherUploadError("FILE_NOT_READABLE", `File is not readable: ${filePath}`);
+  }
+
+  if (fileStats.size <= 0) {
+    throw new VoucherUploadError("FILE_EMPTY", `File is empty: ${filePath}`);
+  }
+
+  const fileHandle = await open(filePath, "r");
+  try {
+    const headerBuffer = Buffer.alloc(4);
+    const { bytesRead } = await fileHandle.read(headerBuffer, 0, headerBuffer.length, 0);
+    if (!isPdfBuffer(headerBuffer.subarray(0, bytesRead))) {
+      throw new VoucherUploadError("FILE_NOT_PDF", `File is not a valid PDF document: ${filePath}`);
+    }
+  } finally {
+    await fileHandle.close();
+  }
+
+  return { filePath };
+}
+
+function buildClientUrl(client: SevdeskClient, path: string): string {
+  const normalizedPath = path.startsWith("/") ? path : `/${path}`;
+  return `${client.baseUrl}${normalizedPath}`;
+}
+
+function getVoucherUploadResponseObject(uploadResult: unknown): Record<string, unknown> | undefined {
+  const root = asRecord(uploadResult);
+  const objects = root?.objects;
+  if (Array.isArray(objects)) {
+    return asRecord(objects[0]);
+  }
+  if (objects !== undefined) {
+    return asRecord(objects);
+  }
+  return root;
+}
+
+async function uploadVoucherFileFromPathInternal(
+  client: SevdeskClient,
+  filePath: string
+): Promise<{
+  filename: string;
+  pages: number | null;
+  originMimeType: string | null;
+  contentHash: string | null;
+}> {
+  const form = new FormData();
+  form.append("file", createReadStream(filePath), {
+    filename: basename(filePath),
+    contentType: "application/pdf",
+  });
+
+  let response: Response;
+  try {
+    response = await fetch(buildClientUrl(client, "/Voucher/Factory/uploadTempFile"), {
+      method: "POST",
+      headers: {
+        ...client.defaultHeaders,
+        ...form.getHeaders(),
+      },
+      body: form as unknown as BodyInit,
+      duplex: "half",
+    } as RequestInit & { duplex: "half" });
+  } catch (error) {
+    throw new VoucherUploadError("UPLOAD_FAILED", `Upload request failed: ${getErrorMessage(error)}`);
+  }
+
+  const responseText = await response.text();
+  if (response.status !== 201) {
+    throw new VoucherUploadError(
+      "UPLOAD_FAILED",
+      `Upload failed with ${response.status}${response.statusText ? ` ${response.statusText}` : ""}: ${responseText || "(empty response body)"}`
+    );
+  }
+
+  if (!responseText) {
+    throw new VoucherUploadError("UPLOAD_RESPONSE_INVALID", "Upload succeeded but sevDesk returned an empty response body");
+  }
+
+  let uploadData: unknown;
+  try {
+    uploadData = JSON.parse(responseText);
+  } catch (error) {
+    throw new VoucherUploadError(
+      "UPLOAD_RESPONSE_INVALID",
+      `Upload succeeded but sevDesk returned invalid JSON: ${getErrorMessage(error)}`
+    );
+  }
+
+  const uploadObject = getVoucherUploadResponseObject(uploadData);
+  const filename = getStringValue(uploadObject?.filename)?.trim();
+  if (!filename) {
+    throw new VoucherUploadError(
+      "UPLOAD_RESPONSE_INVALID",
+      "Upload succeeded but sevDesk response did not include objects.filename"
+    );
+  }
+
+  return {
+    filename,
+    pages: getNumberValue(uploadObject?.pages) ?? null,
+    originMimeType: getStringValue(uploadObject?.originMimeType) ?? null,
+    contentHash: getStringValue(uploadObject?.contentHash) ?? null,
+  };
 }
 
 function buildDraftVoucherBody(params: {
@@ -2219,23 +2404,43 @@ export const voucherTools = {
   },
 
   upload_voucher_file: {
-    description: "Backward-compatible alias for attach_pdf_to_voucher",
+    description:
+      "Write tool: upload a local PDF file to sevDesk via multipart/form-data and return the temporary filename hash required for later voucher save/attach flows.",
     inputSchema: z.object({
-      voucherId: z.number().describe("The ID of the voucher"),
-      fileName: z.string().describe("Name of the file"),
-      base64Content: z.string().describe("Base64 encoded file content"),
-      creditDebit: z.enum(["C", "D"]).optional().describe("C=Credit, D=Debit. Default: D"),
-    }),
+      filePath: z.string().describe("Absolute path to a local PDF file that should be uploaded to sevDesk"),
+    }).strict(),
     handler: async (
       client: SevdeskClient,
-      params: { voucherId: number; fileName: string; base64Content: string; creditDebit?: "C" | "D" }
-    ): Promise<AttachPdfToVoucherResult> =>
-      voucherTools.attach_pdf_to_voucher.handler(client, {
-        voucherId: params.voucherId,
-        fileName: params.fileName,
-        contentBase64: params.base64Content,
-        creditDebit: params.creditDebit,
-      }),
+      params: { filePath: string }
+    ): Promise<UploadVoucherFileResult> => {
+      try {
+        await validateVoucherUploadFilePath(params.filePath);
+      } catch (error) {
+        if (error instanceof VoucherUploadError) {
+          return buildUploadVoucherFileFailure(params.filePath, error.code, error.message);
+        }
+        return buildUploadVoucherFileFailure(params.filePath, "FILE_NOT_READABLE", getErrorMessage(error));
+      }
+
+      try {
+        const uploadResult = await uploadVoucherFileFromPathInternal(client, params.filePath);
+        return {
+          ok: true,
+          filePath: params.filePath,
+          filename: uploadResult.filename,
+          pages: uploadResult.pages,
+          originMimeType: uploadResult.originMimeType,
+          contentHash: uploadResult.contentHash,
+          warnings: [],
+          errors: [],
+        };
+      } catch (error) {
+        if (error instanceof VoucherUploadError) {
+          return buildUploadVoucherFileFailure(params.filePath, error.code, error.message);
+        }
+        return buildUploadVoucherFileFailure(params.filePath, "UPLOAD_FAILED", getErrorMessage(error));
+      }
+    },
   },
 
   create_voucher_from_pdf: {
