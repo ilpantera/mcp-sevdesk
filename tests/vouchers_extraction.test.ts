@@ -31,8 +31,13 @@ function makePngBuffer(): Buffer {
   return Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
 }
 
+/** Convert a Buffer to the ArrayBuffer slice that the sevDesk client returns for document downloads. */
+function toArrayBuffer(buf: Buffer): ArrayBuffer {
+  return buf.buffer.slice(buf.byteOffset, buf.byteOffset + buf.byteLength) as ArrayBuffer;
+}
+
 function buildGetMock(documentId: number, documentBytes: Buffer) {
-  return vi.fn().mockImplementation((path: string, options: { params: { path: Record<string, unknown> } }) => {
+  return vi.fn().mockImplementation((path: string) => {
     if (path === "/Voucher/{voucherId}") {
       return Promise.resolve({
         data: { objects: [{ id: 1, document: { id: documentId, objectName: "Document" } }] },
@@ -41,10 +46,7 @@ function buildGetMock(documentId: number, documentBytes: Buffer) {
     }
     if (path === "/Document/{documentId}") {
       return Promise.resolve({
-        data: documentBytes.buffer.slice(
-          documentBytes.byteOffset,
-          documentBytes.byteOffset + documentBytes.byteLength
-        ) as ArrayBuffer,
+        data: toArrayBuffer(documentBytes),
         error: undefined,
       });
     }
@@ -166,8 +168,7 @@ describe("extract_voucher_document_text_batch", () => {
       }
       if (path === "/Document/{documentId}") {
         const bytes = callIndex <= 1 ? pdfBytes1 : pdfBytes2;
-        const ab = bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) as ArrayBuffer;
-        return Promise.resolve({ data: ab, error: undefined });
+        return Promise.resolve({ data: toArrayBuffer(bytes), error: undefined });
       }
       return Promise.resolve({ data: undefined, error: "unexpected" });
     });

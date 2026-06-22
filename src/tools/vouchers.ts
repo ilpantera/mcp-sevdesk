@@ -1,6 +1,9 @@
 import { z } from "zod";
 import { inflateSync } from "node:zlib";
-// Use the lib path to avoid pdf-parse loading test data at import time in test environments
+// Import from the lib sub-path to bypass the diagnostic test-data loading that
+// pdf-parse's main entry point performs (it reads `./test/data/05-versions-space.pdf`
+// which fails in sandboxed or read-only environments).  If the package restructures
+// its internals, switch back to `require('pdf-parse')` and accept the load-time I/O.
 // eslint-disable-next-line @typescript-eslint/no-require-imports
 const pdfParse = require("pdf-parse/lib/pdf-parse.js") as (
   dataBuffer: Buffer,
@@ -258,6 +261,9 @@ const RECEIPT_GUIDANCE_TAX_RATE_MAP: Record<string, number> = {
   SEVEN: 7,
   NINETEEN: 19,
 };
+// Minimum character count for extracted PDF text to be considered meaningful.
+// Shorter results indicate a text-layer-free (image-only) PDF page.
+const MIN_MEANINGFUL_TEXT_LENGTH = 20;
 
 function callUntypedClientMethod(
   client: SevdeskClient,
@@ -789,7 +795,7 @@ async function extractPdfTextFromBytes(bytes: Buffer): Promise<{ text: string; p
     const result = await pdfParse(bytes, { max: 0 });
     const text = (result.text ?? "").trim();
     const pages = result.numpages ?? 0;
-    if (text.length < 20) {
+    if (text.length < MIN_MEANINGFUL_TEXT_LENGTH) {
       warnings.push(
         "PDF contains no text layer (likely a scanned image PDF). " +
           "For OCR support, consider using direct PDF review in Claude."
@@ -814,7 +820,7 @@ async function extractDocumentTextInternal(
     return {
       voucherId,
       documentId,
-      source: text.length >= 20 ? "pdf-text" : "none",
+      source: text.length >= MIN_MEANINGFUL_TEXT_LENGTH ? "pdf-text" : "none",
       pages,
       text,
       warnings,
@@ -926,7 +932,7 @@ function extractFactsFromZUGFeRD(xml: string): Partial<VoucherFactsResult> {
     const netAmtStr = extractFirstXmlTagContent(block, "LineTotalAmount", "NetAmount");
     const sumNet = parseAmountString(netAmtStr);
     const sumGross = sumNet !== null && taxRate !== null
-      ? roundCurrency(sumNet * (1 + taxRate / 100))
+      ? calculateGross(sumNet, taxRate)
       : null;
     return { description, taxRate, sumNet, sumGross };
   });
@@ -941,7 +947,9 @@ function extractFactsFromZUGFeRD(xml: string): Partial<VoucherFactsResult> {
 function extractFactsFromXRechnung(xml: string): Partial<VoucherFactsResult> {
   const warnings: string[] = [];
 
-  // UBL format: first <cbc:ID> is invoice ID – use matchAll to capture group directly
+  // Best-effort heuristic: in a UBL Invoice/CreditNote the first <*:ID> element
+  // is typically the document ID.  Edge cases with multiple ID-bearing namespace
+  // prefixes may return a non-invoice ID – callers should treat this as a hint.
   const idMatches = Array.from(
     xml.matchAll(/<(?:[\w]*:)?ID[^>]*>([^<]+)<\/(?:[\w]*:)?ID>/gi)
   );
@@ -984,7 +992,7 @@ function extractFactsFromXRechnung(xml: string): Partial<VoucherFactsResult> {
     const netAmtStr = extractFirstXmlTagContent(block, "LineExtensionAmount");
     const sumNet = parseAmountString(netAmtStr);
     const sumGross = sumNet !== null && taxRate !== null
-      ? roundCurrency(sumNet * (1 + taxRate / 100))
+      ? calculateGross(sumNet, taxRate)
       : null;
     return { description, taxRate, sumNet, sumGross };
   });
@@ -998,7 +1006,7 @@ function extractFactsFromXRechnung(xml: string): Partial<VoucherFactsResult> {
 
 export function extractFactsFromPlainText(text: string): Partial<VoucherFactsResult> {
   const warnings: string[] = [];
-  if (!text || text.trim().length < 20) {
+  if (!text || text.trim().length < MIN_MEANINGFUL_TEXT_LENGTH) {
     warnings.push("Text too short for reliable extraction.");
     return {
       invoiceNumber: null,
@@ -1113,7 +1121,7 @@ async function extractVoucherFactsInternal(
 
   // 3. Determine source and extract facts
   const hasEInvoice = einvoiceResult?.isEinvoice === true && einvoiceResult.data?.xml;
-  const hasText = textResult && textResult.text.length >= 20;
+  const hasText = textResult && textResult.text.length >= MIN_MEANINGFUL_TEXT_LENGTH;
 
   let source: VoucherFactsSource = "none";
   let factsFromEInvoice: Partial<VoucherFactsResult> | null = null;
