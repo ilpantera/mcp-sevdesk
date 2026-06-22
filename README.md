@@ -73,6 +73,10 @@ SEVDESK_API_TOKEN="dein-token" npm start
 | `get_voucher_booking_context_batch` | read | Strukturierte Batch-Variante des Booking Context |
 | `get_voucher_document_info` | read | Dokument-Metadaten eines Belegs (documentId, Dateiname, MIME-Typ, hasPdf, hasImagePreview) |
 | `get_voucher_document_info_batch` | read | Batch-Variante von `get_voucher_document_info` für bis zu 50 Belege |
+| `extract_voucher_document_text` | read | Lädt das Belegdokument serverseitig herunter und extrahiert den Text (PDF-Textlayer-first) |
+| `extract_voucher_document_text_batch` | read | Batch-Variante von `extract_voucher_document_text` für bis zu 20 Belege |
+| `extract_voucher_facts` | read | Extrahiert strukturierte Belegdaten (Lieferant, Rechnungsnummer, Betrag, …) – E-Invoice-first, dann Text-Heuristiken |
+| `extract_voucher_facts_batch` | read | Batch-Variante von `extract_voucher_facts` für bis zu 20 Belege |
 | `validate_voucher_booking_plan` | read | Strikte lokale Validierung eines Voucher-Buchungsplans, optional mit Receipt Guidance |
 | `apply_voucher_booking_plan` | write | Empfohlenes High-Level-Tool für konsistente Voucher-Buchung |
 | `get_receipt_guidance` | read | Erlaubte Konto-/TaxRule-/TaxRate-Kombinationen aus sevDesk |
@@ -119,6 +123,71 @@ Diese Bereiche bleiben bewusst **low-level**. Für Update 2.0 werden Statuswechs
 
 - Tags
 - Reports
+
+## Serverseitige Dokumentenextraktion
+
+`extract_voucher_document_text` und `extract_voucher_facts` laden Belegdokumente **serverseitig** herunter und geben kompakten Text bzw. strukturierte Daten zurück – Claude arbeitet damit statt mit rohen PDF-/Base64-Payloads.
+
+### Ablauf (empfohlene Reihenfolge)
+
+1. Entwurfs-Belege laden: `list_vouchers(status="50")`
+2. Strukturierte Fakten extrahieren: `extract_voucher_facts_batch(voucherIds)`
+   - Liefert Lieferant, Rechnungsnummer, Datum, Währung, Beträge
+   - Bevorzugt E-Invoice-Daten (ZUGFeRD/XRechnung) wenn vorhanden
+   - Fällt auf PDF-Textextraktion mit Regex-Heuristiken zurück
+3. Für fehlende Felder: `extract_voucher_document_text(voucherId)` → Claude wertet den Rohtext aus
+4. Buchungsplan erstellen und validieren: `validate_voucher_booking_plan`
+5. Plan schreiben: `apply_voucher_booking_plan`
+
+### Rückgabeformat `extract_voucher_facts`
+
+```json
+{
+  "voucherId": 147848515,
+  "documentId": 123456,
+  "source": "einvoice",
+  "supplier": "Lieferant GmbH",
+  "invoiceNumber": "RE-2024-001",
+  "invoiceDate": "2024-01-15",
+  "currency": "EUR",
+  "creditDebitHint": null,
+  "positions": [
+    { "description": "Beratungsleistung", "taxRate": 19, "sumNet": 100.00, "sumGross": 119.00 }
+  ],
+  "totals": { "net": 100.00, "gross": 119.00, "tax": 19.00 },
+  "warnings": []
+}
+```
+
+Mögliche Werte für `source`:
+
+| Wert | Bedeutung |
+|---|---|
+| `einvoice` | Alle Felder aus ZUGFeRD/XRechnung-XML |
+| `mixed` | E-Invoice + PDF-Text zusammengeführt |
+| `pdf-text` | Nur PDF-Textlayer + Regex-Heuristiken |
+| `none` | Kein Text extrahierbar (z. B. reines Bilddokument) |
+
+### Rückgabeformat `extract_voucher_document_text`
+
+```json
+{
+  "voucherId": 147848515,
+  "documentId": 123456,
+  "source": "pdf-text",
+  "pages": 2,
+  "text": "Lieferant GmbH\nRechnungsnummer: RE-2024-001\n...",
+  "warnings": []
+}
+```
+
+### Hinweise und Einschränkungen
+
+- **Durchsuchbare PDFs** (mit Textlayer, z. B. von modernen Scannern oder digitalen Rechnungen): vollständige Textextraktion.
+- **Bildbasierte PDFs** (gescannte Seiten ohne Textlayer): `source: "none"`, Warnung im `warnings`-Array. Für diese Fälle empfiehlt sich der direkte PDF-Review in Claude.
+- **JPEG/PNG-Dokumente**: ebenfalls `source: "none"` mit Warnung. Direkte Claude-Analyse bleibt die zuverlässigste Option für Bilddokumente.
+- Felder, die nicht zuverlässig bestimmt werden können, sind `null` mit erklärender Warnung.
+- Die Batch-Varianten erlauben bis zu **20 Belege** pro Aufruf.
 
 ## PDF-first Review Workflow
 
