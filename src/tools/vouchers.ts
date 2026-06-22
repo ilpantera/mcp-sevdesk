@@ -1270,6 +1270,7 @@ async function uploadVoucherFileFromPathInternal(
         ...form.getHeaders(),
       },
       body: form as unknown as BodyInit,
+      // Node fetch requires duplex for streamed request bodies such as form-data's Readable stream.
       duplex: "half",
     } as RequestInit & { duplex: "half" });
   } catch (error) {

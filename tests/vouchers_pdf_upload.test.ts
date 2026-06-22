@@ -27,7 +27,7 @@ function createMockClient(overrides: Partial<SevdeskClient> = {}) {
 const tempDirectories: string[] = [];
 
 function createTempUploadFile(fileName: string, bytes: Buffer): string {
-  const directory = mkdtempSync(join(tmpdir(), "mcp-sevdesk-upload-"));
+  const directory = mkdtempSync(join(tmpdir(), "mcp-sevdesk-test-upload-"));
   tempDirectories.push(directory);
   const filePath = join(directory, fileName);
   writeFileSync(filePath, bytes);
