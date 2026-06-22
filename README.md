@@ -75,7 +75,9 @@ SEVDESK_API_TOKEN="dein-token" npm start
 | `get_voucher_document_info_batch` | read | Batch-Variante von `get_voucher_document_info` für bis zu 50 Belege |
 | `get_voucher_original_pdf` | read | Liefert das Original-PDF eines Belegs als Base64-Payload (primär via `GET /Export/voucherZip`, deterministisch gemappt) |
 | `get_voucher_original_pdf_batch` | read | Batch-Variante von `get_voucher_original_pdf` für bis zu 20 Belege |
-| `create_voucher_from_pdf` | write | Nimmt ein hochgeladenes PDF-Payload (`fileName`, `contentBase64`) entgegen und erstellt daraus einen neuen sevDesk-Beleg |
+| `create_draft_voucher` | write | Erstellt einen neuen sevDesk-Entwurfsbeleg und verifiziert, dass er direkt wieder lesbar ist |
+| `attach_pdf_to_voucher` | write | Hängt ein hochgeladenes PDF an einen bestehenden Beleg an (multipart Upload + Sichtbarkeitsprüfung) |
+| `create_voucher_from_pdf` | write | Komfort-Workflow: erstellt zuerst den Entwurfsbeleg, prüft ihn und hängt erst danach das hochgeladene PDF an |
 | `validate_voucher_booking_plan` | read | Strikte lokale Validierung eines Voucher-Buchungsplans, optional mit Receipt Guidance |
 | `apply_voucher_booking_plan` | write | Empfohlenes High-Level-Tool für konsistente Voucher-Buchung |
 | `get_receipt_guidance` | read | Erlaubte Konto-/TaxRule-/TaxRate-Kombinationen aus sevDesk |
@@ -130,11 +132,17 @@ Der MCP liefert Original-PDFs für Claude/Cowork als Primärartefakt. Der Vouche
 ### Upload-Workflow für neue Belege (Cowork → MCP → sevDesk)
 
 - Cowork/Client liest lokale PDFs selbst (Ordner-Handling bleibt **außerhalb** des MCP-Servers).
-- MCP erwartet hochgeladene Payloads per `create_voucher_from_pdf`.
+- MCP erwartet hochgeladene Payloads per `attach_pdf_to_voucher` oder dem Komfort-Workflow `create_voucher_from_pdf`.
 - MCP validiert:
   - `contentBase64` vorhanden und decodierbar
   - PDF-Signatur (`%PDF`) vorhanden
-- MCP lädt die Datei über sevDesk hoch und erstellt einen **neuen** Voucher.
+- MCP arbeitet intern explizit in zwei Phasen:
+  1. `create_draft_voucher`: neuen Draft/Voucher mit minimalen sicheren Headerdaten anlegen
+  2. direkten Re-Read des erzeugten Vouchers zur Verifikation
+  3. `attach_pdf_to_voucher`: PDF per multipart/form-data hochladen und an den bereits existierenden Voucher anhängen
+  4. erneute Verifikation, dass der Voucher jetzt ein sichtbares Dokument hat
+- `create_voucher_from_pdf` orchestriert genau diese zwei Phasen für agent-freundliche Client-Aufrufe.
+- Der MCP normalisiert `sum`/`sumNet` intern für sevDesk-kompatible Schreiboperationen, sodass Clients die Inkonsistenz nicht selbst behandeln müssen.
 - Ergebnis enthält strukturiert mindestens:
   - `ok`
   - `voucherId`
@@ -142,6 +150,12 @@ Der MCP liefert Original-PDFs für Claude/Cowork als Primärartefakt. Der Vouche
   - `fileName`
   - `warnings`
   - `errors`
+- Fehlercodes unterscheiden mindestens:
+  - `VOUCHER_CREATE_FAILED`
+  - `VOUCHER_VERIFY_FAILED`
+  - `PDF_BASE64_INVALID` / `PDF_NOT_VALID`
+  - `PDF_ATTACH_FAILED`
+  - `PDF_ATTACH_VERIFY_FAILED`
 
 Beispiel-Input:
 
