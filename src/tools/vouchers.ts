@@ -2247,8 +2247,8 @@ export const voucherTools = {
 
   get_voucher_original_pdf: {
     description:
-      "Read-only tool that returns the original voucher PDF as base64 for Claude/Cowork review. " +
-      "Primary retrieval path is GET /Export/voucherZip with deterministic ZIP entry matching. " +
+      "Read-only PDF-first tool that returns the original voucher PDF as base64 for Claude/Cowork review. " +
+      "The MCP downloads GET /Export/voucherZip, decodes and unpacks ZIP payloads server-side, then matches the PDF deterministically. " +
       "If voucherZip retrieval fails, /Document/{documentId} is used as explicit fallback with warnings.",
     inputSchema: z.object({
       voucherId: z.number().int().positive().describe("The ID of the voucher"),
@@ -2259,7 +2259,7 @@ export const voucherTools = {
 
   get_voucher_original_pdf_batch: {
     description:
-      "Read-only batch variant of get_voucher_original_pdf. Returns original PDF payloads for up to 20 vouchers. " +
+      "Read-only batch variant of get_voucher_original_pdf. Returns PDF-first original PDF payloads for up to 20 vouchers. " +
       "Per-voucher errors are returned in result items; top-level ok=false when at least one voucher fails.",
     inputSchema: z.object({
       voucherIds: z.array(z.number().int().positive()).min(1).max(20),

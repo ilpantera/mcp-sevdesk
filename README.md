@@ -1,6 +1,6 @@
 # mcp-sevdesk
 
-MCP-Server für sevDesk, optimiert für **sevDesk Update 2.0 / aktuelle OpenAPI**.
+MCP-Server für sevDesk mit **v2.1 PDF-first Voucher-Workflow**.
 Der Fokus liegt auf agent-tauglichen Buchhaltungsworkflows statt auf maximal generischen CRUD-Aufrufen.
 
 ## Positionierung
@@ -122,9 +122,9 @@ Diese Bereiche bleiben bewusst **low-level**. Für Update 2.0 werden Statuswechs
 - Tags
 - Reports
 
-## PDF-first Dokumentworkflow
+## PDF-first Dokumentworkflow (v2.1)
 
-Der MCP liefert Original-PDFs für Claude/Cowork als Primärartefakt. Serverseitige OCR/Text-/Faktenextraktion ist kein empfohlener Workflow mehr.
+Der MCP liefert Original-PDFs für Claude/Cowork als Primärartefakt. Der Voucher-Standardflow arbeitet ohne serverseitige Inhalts-Extraktionsschicht.
 
 Primärpfad für den Dokumentabruf ist `GET /Export/voucherZip`:
 

@@ -63,6 +63,20 @@ describe("voucherZip helpers", () => {
     expect(entry).toBeNull();
     expect(warnings[0]).toMatch(/Multiple ZIP entries matched basename/i);
   });
+
+  it("matches by documentId token when filename is unavailable", () => {
+    const { entry, warnings } = pickVoucherZipEntryForDocument(
+      [
+        { fileName: "exports/147848515.pdf", bytes: Buffer.from("x") },
+        { fileName: "exports/other.pdf", bytes: Buffer.from("y") },
+      ],
+      147848515,
+      null
+    );
+
+    expect(entry?.fileName).toBe("exports/147848515.pdf");
+    expect(warnings[0]).toMatch(/Matched ZIP entry by documentId token/i);
+  });
 });
 
 describe("get_voucher_original_pdf", () => {
