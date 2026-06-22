@@ -75,6 +75,7 @@ SEVDESK_API_TOKEN="dein-token" npm start
 | `get_voucher_document_info_batch` | read | Batch-Variante von `get_voucher_document_info` für bis zu 50 Belege |
 | `get_voucher_original_pdf` | read | Liefert das Original-PDF eines Belegs als Base64-Payload (primär via `GET /Export/voucherZip`, deterministisch gemappt) |
 | `get_voucher_original_pdf_batch` | read | Batch-Variante von `get_voucher_original_pdf` für bis zu 20 Belege |
+| `create_voucher_from_pdf` | write | Nimmt ein hochgeladenes PDF-Payload (`fileName`, `contentBase64`) entgegen und erstellt daraus einen neuen sevDesk-Beleg |
 | `validate_voucher_booking_plan` | read | Strikte lokale Validierung eines Voucher-Buchungsplans, optional mit Receipt Guidance |
 | `apply_voucher_booking_plan` | write | Empfohlenes High-Level-Tool für konsistente Voucher-Buchung |
 | `get_receipt_guidance` | read | Erlaubte Konto-/TaxRule-/TaxRate-Kombinationen aus sevDesk |
@@ -125,6 +126,35 @@ Diese Bereiche bleiben bewusst **low-level**. Für Update 2.0 werden Statuswechs
 ## PDF-first Dokumentworkflow (v2.1)
 
 Der MCP liefert Original-PDFs für Claude/Cowork als Primärartefakt. Der Voucher-Standardflow arbeitet ohne serverseitige Inhalts-Extraktionsschicht.
+
+### Upload-Workflow für neue Belege (Cowork → MCP → sevDesk)
+
+- Cowork/Client liest lokale PDFs selbst (Ordner-Handling bleibt **außerhalb** des MCP-Servers).
+- MCP erwartet hochgeladene Payloads per `create_voucher_from_pdf`.
+- MCP validiert:
+  - `contentBase64` vorhanden und decodierbar
+  - PDF-Signatur (`%PDF`) vorhanden
+- MCP lädt die Datei über sevDesk hoch und erstellt einen **neuen** Voucher.
+- Ergebnis enthält strukturiert mindestens:
+  - `ok`
+  - `voucherId`
+  - `documentId` (falls verfügbar)
+  - `fileName`
+  - `warnings`
+  - `errors`
+
+Beispiel-Input:
+
+```json
+{
+  "fileName": "eingangsbeleg.pdf",
+  "contentBase64": "<base64-pdf>",
+  "voucherDate": "2026-06-22",
+  "description": "Hotelrechnung Juni",
+  "supplierName": "Muster Hotel GmbH",
+  "creditDebit": "D"
+}
+```
 
 Primärpfad für den Dokumentabruf ist `GET /Export/voucherZip`:
 

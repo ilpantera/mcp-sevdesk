@@ -74,7 +74,13 @@ export type VoucherBookingPlanIssueCode =
   | "ZIP_AMBIGUOUS_MATCH"
   | "ZIP_MATCH_NOT_PDF"
   | "FALLBACK_NOT_PDF"
-  | "FALLBACK_FAILED";
+  | "FALLBACK_FAILED"
+  // PDF upload-to-voucher specific codes
+  | "PDF_PAYLOAD_MISSING"
+  | "PDF_BASE64_INVALID"
+  | "PDF_NOT_VALID"
+  | "PDF_UPLOAD_FAILED"
+  | "VOUCHER_CREATE_FAILED";
 
 export type VoucherBookingPlanIssue = {
   code: VoucherBookingPlanIssueCode;
@@ -187,6 +193,15 @@ type VoucherOriginalPdfResult = {
   contentBase64: string;
   sizeBytes: number;
   warnings: string[];
+};
+
+type CreateVoucherFromPdfResult = {
+  ok: boolean;
+  voucherId: number | null;
+  documentId: number | null;
+  fileName: string;
+  warnings: string[];
+  errors: VoucherBookingPlanIssue[];
 };
 
 type VoucherBatchResult<T> = {
@@ -989,6 +1004,50 @@ async function downloadDocumentBytesViaVoucherZipInternal(
 
 function isPdfBuffer(bytes: Buffer): boolean {
   return bytes.length >= 4 && bytes.subarray(0, 4).toString("ascii") === "%PDF";
+}
+
+function decodeBase64Strict(base64Value: string): Buffer | null {
+  const normalized = base64Value.replace(/\s+/g, "");
+  if (!normalized) {
+    return null;
+  }
+
+  if (!/^[A-Za-z0-9+/]+={0,2}$/.test(normalized) || normalized.length % 4 !== 0) {
+    return null;
+  }
+
+  const decoded = Buffer.from(normalized, "base64");
+  if (decoded.length === 0) {
+    return null;
+  }
+
+  const normalizedWithoutPadding = normalized.replace(/=+$/, "");
+  const decodedWithoutPadding = decoded.toString("base64").replace(/=+$/, "");
+  return decodedWithoutPadding === normalizedWithoutPadding ? decoded : null;
+}
+
+function getUploadedTempFilename(uploadResult: unknown): string | undefined {
+  const root = asRecord(uploadResult);
+  const objects = root?.objects;
+  if (Array.isArray(objects)) {
+    return getStringValue(asRecord(objects[0])?.filename);
+  }
+  if (objects !== undefined) {
+    return getStringValue(asRecord(objects)?.filename);
+  }
+  return getStringValue(root?.filename);
+}
+
+function getVoucherIdFromSaveVoucherResult(saveResult: unknown): number | undefined {
+  const saveRecord = asRecord(saveResult);
+  const voucherRecord = asRecord(saveRecord?.voucher);
+  return getNumberValue(voucherRecord?.id);
+}
+
+function getDocumentIdFromSaveVoucherResult(saveResult: unknown): number | undefined {
+  const saveRecord = asRecord(saveResult);
+  const voucherRecord = asRecord(saveRecord?.voucher);
+  return getNumberValue(asRecord(voucherRecord?.document)?.id);
 }
 
 async function downloadVoucherOriginalPdfInternal(
@@ -1815,6 +1874,165 @@ export const voucherTools = {
       });
       if (error) throw new Error(JSON.stringify(error));
       return data;
+    },
+  },
+
+  create_voucher_from_pdf: {
+    description:
+      "Write tool: create a new sevDesk voucher directly from an uploaded PDF payload (no local file path). " +
+      "Validates base64 input and PDF signature before uploading and creating the voucher.",
+    inputSchema: z.object({
+      fileName: z.string().min(1).describe("Original PDF file name from the client"),
+      contentBase64: z.string().min(1).describe("Base64-encoded PDF bytes"),
+      voucherDate: z.string().optional().describe("Voucher date. Prefer YYYY-MM-DD or YYYY-MM-DDTHH:mm:ss"),
+      description: z.string().optional().describe("Optional voucher description"),
+      supplierName: z.string().optional().describe("Optional supplier name"),
+      creditDebit: z.enum(["C", "D"]).optional().describe("Voucher direction: C=credit, D=debit (default D)"),
+    }).strict(),
+    handler: async (client: SevdeskClient, params: {
+      fileName: string;
+      contentBase64: string;
+      voucherDate?: string;
+      description?: string;
+      supplierName?: string;
+      creditDebit?: "C" | "D";
+    }): Promise<CreateVoucherFromPdfResult> => {
+      const warnings: string[] = [];
+      const trimmedFileName = params.fileName.trim();
+      const normalizedBase64 = params.contentBase64.trim();
+
+      if (!trimmedFileName) {
+        return {
+          ok: false,
+          voucherId: null,
+          documentId: null,
+          fileName: params.fileName,
+          warnings,
+          errors: [createIssue("PDF_PAYLOAD_MISSING", "fileName is required")],
+        };
+      }
+
+      if (!normalizedBase64) {
+        return {
+          ok: false,
+          voucherId: null,
+          documentId: null,
+          fileName: trimmedFileName,
+          warnings,
+          errors: [createIssue("PDF_PAYLOAD_MISSING", "contentBase64 is required")],
+        };
+      }
+
+      const decodedBytes = decodeBase64Strict(normalizedBase64);
+      if (!decodedBytes) {
+        return {
+          ok: false,
+          voucherId: null,
+          documentId: null,
+          fileName: trimmedFileName,
+          warnings,
+          errors: [createIssue("PDF_BASE64_INVALID", "contentBase64 is not valid base64 data")],
+        };
+      }
+
+      if (!isPdfBuffer(decodedBytes)) {
+        return {
+          ok: false,
+          voucherId: null,
+          documentId: null,
+          fileName: trimmedFileName,
+          warnings,
+          errors: [createIssue("PDF_NOT_VALID", "Decoded payload is not a valid PDF document")],
+        };
+      }
+
+      const voucherDate = params.voucherDate ?? new Date().toISOString().slice(0, 10);
+      if (!params.voucherDate) {
+        warnings.push("voucherDate was not provided. Defaulted to current date.");
+      }
+
+      const { data: uploadData, error: uploadError } = await client.POST("/Voucher/Factory/uploadTempFile", {
+        body: {
+          content: normalizedBase64,
+          filename: trimmedFileName,
+          base64: true,
+          creditDebit: params.creditDebit ?? "D",
+        } as any,
+      });
+      if (uploadError) {
+        return {
+          ok: false,
+          voucherId: null,
+          documentId: null,
+          fileName: trimmedFileName,
+          warnings,
+          errors: [createIssue("PDF_UPLOAD_FAILED", `PDF upload failed: ${JSON.stringify(uploadError)}`)],
+        };
+      }
+
+      const uploadedFileName = getUploadedTempFilename(uploadData);
+      if (!uploadedFileName) {
+        return {
+          ok: false,
+          voucherId: null,
+          documentId: null,
+          fileName: trimmedFileName,
+          warnings,
+          errors: [
+            createIssue(
+              "PDF_UPLOAD_FAILED",
+              "PDF upload succeeded but sevDesk did not return a temporary filename for saveVoucher"
+            ),
+          ],
+        };
+      }
+
+      const voucherBody: Record<string, unknown> = {
+        objectName: "Voucher",
+        mapAll: true,
+        voucherDate,
+        status: 50,
+        creditDebit: params.creditDebit ?? "D",
+        voucherType: "VOU",
+      };
+      if (params.description) voucherBody.description = params.description;
+      if (params.supplierName) voucherBody.supplierName = params.supplierName;
+
+      const { data: saveData, error: saveError } = await (client.POST as any)("/Voucher/Factory/saveVoucher", {
+        body: {
+          voucher: voucherBody,
+          voucherPosSave: [],
+          filename: uploadedFileName,
+        },
+      });
+      if (saveError) {
+        return {
+          ok: false,
+          voucherId: null,
+          documentId: null,
+          fileName: trimmedFileName,
+          warnings,
+          errors: [createIssue("VOUCHER_CREATE_FAILED", `Voucher creation failed: ${JSON.stringify(saveError)}`)],
+        };
+      }
+
+      const voucherId = getVoucherIdFromSaveVoucherResult(saveData) ?? null;
+      const documentId = getDocumentIdFromSaveVoucherResult(saveData) ?? null;
+      if (!voucherId) {
+        warnings.push("Voucher was created but response did not include a numeric voucherId.");
+      }
+      if (!documentId) {
+        warnings.push("Response did not include a numeric documentId.");
+      }
+
+      return {
+        ok: true,
+        voucherId,
+        documentId,
+        fileName: trimmedFileName,
+        warnings,
+        errors: [],
+      };
     },
   },
 
