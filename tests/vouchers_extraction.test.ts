@@ -108,9 +108,10 @@ describe("get_voucher_original_pdf", () => {
       { voucherId: 1 }
     );
 
-    expect(result.source).toBe("voucherZip");
-    expect(Buffer.from(result.contentBase64, "base64").equals(pdfBytes)).toBe(true);
-    expect(result.warnings.some((warning) => warning.includes("Export/voucherZip primary path"))).toBe(true);
+    expect(result.ok).toBe(true);
+    expect(result.data?.source).toBe("voucherZip");
+    expect(Buffer.from(result.data!.contentBase64, "base64").equals(pdfBytes)).toBe(true);
+    expect(result.data?.warnings.some((warning) => warning.includes("Export/voucherZip primary path"))).toBe(true);
   });
 
   it("falls back to /Document when voucherZip retrieval fails", async () => {
@@ -142,12 +143,101 @@ describe("get_voucher_original_pdf", () => {
       { voucherId: 1 }
     );
 
-    expect(result.source).toBe("document-download-fallback");
-    expect(result.warnings[0]).toMatch(/Export\/voucherZip primary retrieval failed/i);
+    expect(result.ok).toBe(true);
+    expect(result.data?.source).toBe("document-download-fallback");
+    expect(result.data?.warnings[0]).toMatch(/Export\/voucherZip primary retrieval failed/i);
   });
 
-  it("throws when neither primary path nor fallback returns a PDF", async () => {
+  it("returns FALLBACK_NOT_PDF when fallback download is an image, not a PDF", async () => {
+    // Real-world case: hasPdf=false, document is image, voucherZip also fails
     const zipBytes = makeZipWithStoreCompression([{ fileName: "exports/a1b2c3d4e5.pdf", bytes: Buffer.from("not-pdf") }]);
+    const GET = vi.fn().mockImplementation((path: string) => {
+      if (path === "/Voucher/{voucherId}") {
+        return Promise.resolve({
+          data: { objects: [{ id: 1, document: { id: 42, objectName: "Document" } }] },
+          error: undefined,
+        });
+      }
+      if (path === "/Voucher/{voucherId}/getDocumentImage") {
+        return Promise.resolve({
+          data: { objects: { filename: "a1b2c3d4e5.jpg", originMimeType: "image/jpeg", mimeType: "image/jpeg" } },
+          error: undefined,
+        });
+      }
+      if (path === "/Export/voucherZip") {
+        return Promise.resolve({ data: { objects: { content: zipBytes.toString("base64"), base64Encoded: true } }, error: undefined });
+      }
+      if (path === "/Document/{documentId}") {
+        return Promise.resolve({ data: toArrayBuffer(Buffer.from("JFIF\x00still-an-image")), error: undefined });
+      }
+      return Promise.resolve({ data: undefined, error: "unexpected call" });
+    });
+
+    const result = await voucherTools.get_voucher_original_pdf.handler(
+      { GET } as unknown as SevdeskClient,
+      { voucherId: 1 }
+    );
+
+    expect(result.ok).toBe(false);
+    expect(result.errors[0].code).toBe("FALLBACK_NOT_PDF");
+    expect(result.errors[0].message).toMatch(/not a valid PDF.*image/i);
+  });
+
+  it("returns FALLBACK_FAILED when fallback request itself fails", async () => {
+    const GET = vi.fn().mockImplementation((path: string) => {
+      if (path === "/Voucher/{voucherId}") {
+        return Promise.resolve({
+          data: { objects: [{ id: 1, document: { id: 42, objectName: "Document" } }] },
+          error: undefined,
+        });
+      }
+      if (path === "/Voucher/{voucherId}/getDocumentImage") {
+        return Promise.resolve({
+          data: { objects: { filename: "doc.pdf", originMimeType: "application/pdf", mimeType: "image/jpeg" } },
+          error: undefined,
+        });
+      }
+      if (path === "/Export/voucherZip") {
+        return Promise.resolve({ data: undefined, error: { message: "zip failed" } });
+      }
+      if (path === "/Document/{documentId}") {
+        return Promise.resolve({ data: undefined, error: { message: "document 403 forbidden" } });
+      }
+      return Promise.resolve({ data: undefined, error: "unexpected call" });
+    });
+
+    const result = await voucherTools.get_voucher_original_pdf.handler(
+      { GET } as unknown as SevdeskClient,
+      { voucherId: 1 }
+    );
+
+    expect(result.ok).toBe(false);
+    expect(result.errors[0].code).toBe("FALLBACK_FAILED");
+    expect(result.errors[0].message).toMatch(/fallback.*also failed/i);
+  });
+
+  it("returns VOUCHER_NO_DOCUMENT when voucher has no document attached", async () => {
+    const GET = vi.fn().mockImplementation((path: string) => {
+      if (path === "/Voucher/{voucherId}") {
+        return Promise.resolve({
+          data: { objects: [{ id: 1 }] }, // no document field
+          error: undefined,
+        });
+      }
+      return Promise.resolve({ data: undefined, error: "unexpected call" });
+    });
+
+    const result = await voucherTools.get_voucher_original_pdf.handler(
+      { GET } as unknown as SevdeskClient,
+      { voucherId: 1 }
+    );
+
+    expect(result.ok).toBe(false);
+    expect(result.errors[0].code).toBe("VOUCHER_NO_DOCUMENT");
+  });
+
+  it("returns ZIP_MATCH_NOT_PDF when ZIP entry is found but content is not a valid PDF", async () => {
+    const zipBytes = makeZipWithStoreCompression([{ fileName: "exports/a1b2c3d4e5.pdf", bytes: Buffer.from("not-a-pdf") }]);
     const GET = vi.fn().mockImplementation((path: string) => {
       if (path === "/Voucher/{voucherId}") {
         return Promise.resolve({
@@ -165,22 +255,59 @@ describe("get_voucher_original_pdf", () => {
         return Promise.resolve({ data: { objects: { content: zipBytes.toString("base64"), base64Encoded: true } }, error: undefined });
       }
       if (path === "/Document/{documentId}") {
+        // fallback also fails so we can see the specific ZIP_MATCH_NOT_PDF code propagate
         return Promise.resolve({ data: toArrayBuffer(Buffer.from("still-not-pdf")), error: undefined });
       }
       return Promise.resolve({ data: undefined, error: "unexpected call" });
     });
 
-    await expect(
-      voucherTools.get_voucher_original_pdf.handler(
-        { GET } as unknown as SevdeskClient,
-        { voucherId: 1 }
-      )
-    ).rejects.toThrow(/not a PDF/i);
+    const result = await voucherTools.get_voucher_original_pdf.handler(
+      { GET } as unknown as SevdeskClient,
+      { voucherId: 1 }
+    );
+
+    expect(result.ok).toBe(false);
+    // ZIP_MATCH_NOT_PDF triggers fallback; fallback is not PDF → FALLBACK_NOT_PDF
+    expect(["ZIP_MATCH_NOT_PDF", "FALLBACK_NOT_PDF"]).toContain(result.errors[0].code);
+  });
+
+  it("returns ZIP_NO_CONTENT when voucherZip returns empty content payload", async () => {
+    const GET = vi.fn().mockImplementation((path: string) => {
+      if (path === "/Voucher/{voucherId}") {
+        return Promise.resolve({
+          data: { objects: [{ id: 1, document: { id: 42, objectName: "Document" } }] },
+          error: undefined,
+        });
+      }
+      if (path === "/Voucher/{voucherId}/getDocumentImage") {
+        return Promise.resolve({
+          data: { objects: { filename: "doc.pdf", originMimeType: "application/pdf", mimeType: "image/jpeg" } },
+          error: undefined,
+        });
+      }
+      if (path === "/Export/voucherZip") {
+        // Simulates download=false with content: null
+        return Promise.resolve({ data: { objects: { content: null, base64Encoded: true } }, error: undefined });
+      }
+      if (path === "/Document/{documentId}") {
+        return Promise.resolve({ data: toArrayBuffer(Buffer.from("not-a-pdf")), error: undefined });
+      }
+      return Promise.resolve({ data: undefined, error: "unexpected call" });
+    });
+
+    const result = await voucherTools.get_voucher_original_pdf.handler(
+      { GET } as unknown as SevdeskClient,
+      { voucherId: 1 }
+    );
+
+    expect(result.ok).toBe(false);
+    // ZIP_NO_CONTENT triggers fallback; fallback is not PDF → FALLBACK_NOT_PDF
+    expect(["ZIP_NO_CONTENT", "FALLBACK_NOT_PDF"]).toContain(result.errors[0].code);
   });
 });
 
 describe("get_voucher_original_pdf_batch", () => {
-  it("returns mixed success/failure entries with DOCUMENT_DOWNLOAD_FAILED error code", async () => {
+  it("returns mixed success/failure entries with specific error codes per failure mode", async () => {
     const pdfBytes = loadRealPdfWithText();
     const zipBytes = makeZipWithStoreCompression([{ fileName: "exports/a1b2c3d4e5.pdf", bytes: pdfBytes }]);
 
@@ -193,6 +320,7 @@ describe("get_voucher_original_pdf_batch", () => {
             error: undefined,
           });
         }
+        // voucher 2 has no document — should produce VOUCHER_NO_DOCUMENT
         return Promise.resolve({ data: { objects: [{ id: 2 }] }, error: undefined });
       }
       if (path === "/Voucher/{voucherId}/getDocumentImage") {
@@ -217,6 +345,46 @@ describe("get_voucher_original_pdf_batch", () => {
     const failure = result.results.find((entry) => entry.voucherId === 2);
     expect(success?.ok).toBe(true);
     expect(failure?.ok).toBe(false);
-    expect(failure?.errors[0].code).toBe("DOCUMENT_DOWNLOAD_FAILED");
+    expect(failure?.errors[0].code).toBe("VOUCHER_NO_DOCUMENT");
+  });
+
+  it("returns FALLBACK_NOT_PDF code when document is an image (real-world hasPdf=false case)", async () => {
+    // Reproduces the reported production failure:
+    // voucherZip returned no matching PDF entry; /Document fallback returned an image.
+    const zipBytes = makeZipWithStoreCompression([{ fileName: "exports/unrelated.pdf", bytes: Buffer.from("not-pdf") }]);
+
+    const GET = vi.fn().mockImplementation((path: string) => {
+      if (path === "/Voucher/{voucherId}") {
+        return Promise.resolve({
+          data: { objects: [{ id: 147848515, document: { id: 999, objectName: "Document" } }] },
+          error: undefined,
+        });
+      }
+      if (path === "/Voucher/{voucherId}/getDocumentImage") {
+        return Promise.resolve({
+          data: { objects: { filename: "belege.jpg", originMimeType: "image/jpeg", mimeType: "image/jpeg" } },
+          error: undefined,
+        });
+      }
+      if (path === "/Export/voucherZip") {
+        return Promise.resolve({ data: { objects: { content: zipBytes.toString("base64"), base64Encoded: true } }, error: undefined });
+      }
+      if (path === "/Document/{documentId}") {
+        // Fallback returns JPEG bytes
+        return Promise.resolve({ data: toArrayBuffer(Buffer.from("\xFF\xD8\xFF\xE0")), error: undefined });
+      }
+      return Promise.resolve({ data: undefined, error: "unexpected call" });
+    });
+
+    const result = await voucherTools.get_voucher_original_pdf_batch.handler(
+      { GET } as unknown as SevdeskClient,
+      { voucherIds: [147848515] }
+    );
+
+    expect(result.ok).toBe(false);
+    const entry = result.results[0];
+    expect(entry.ok).toBe(false);
+    expect(entry.errors[0].code).toBe("FALLBACK_NOT_PDF");
+    expect(entry.errors[0].message).toMatch(/not a valid PDF.*image/i);
   });
 });

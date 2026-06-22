@@ -147,15 +147,35 @@ Wenn die voucherZip-Route fehlschlägt, wird ein expliziter Fallback auf `/Docum
 
 ### Rückgabeformat `get_voucher_original_pdf`
 
+Bei Erfolg (`ok: true`):
+
 ```json
 {
+  "ok": true,
   "voucherId": 147848515,
-  "documentId": 123456,
-  "source": "voucherZip",
-  "fileName": "a1b2c3d4.pdf",
-  "mimeType": "application/pdf",
-  "contentBase64": "<base64-pdf>",
-  "sizeBytes": 48321,
+  "data": {
+    "voucherId": 147848515,
+    "documentId": 123456,
+    "source": "voucherZip",
+    "fileName": "a1b2c3d4.pdf",
+    "mimeType": "application/pdf",
+    "contentBase64": "<base64-pdf>",
+    "sizeBytes": 48321,
+    "warnings": []
+  },
+  "errors": [],
+  "warnings": []
+}
+```
+
+Bei Fehler (`ok: false`):
+
+```json
+{
+  "ok": false,
+  "voucherId": 147848515,
+  "data": null,
+  "errors": [{ "code": "FALLBACK_NOT_PDF", "message": "..." }],
   "warnings": []
 }
 ```
@@ -166,6 +186,22 @@ Wenn die voucherZip-Route fehlschlägt, wird ein expliziter Fallback auf `/Docum
 |---|---|
 | `voucherZip` | Primärpfad `GET /Export/voucherZip` erfolgreich |
 | `document-download-fallback` | voucherZip fehlgeschlagen, `/Document/{documentId}` als Fallback genutzt |
+
+#### Fehler-Codes bei PDF-Abruf
+
+| Code | Bedeutung |
+|---|---|
+| `VOUCHER_NO_DOCUMENT` | Voucher hat kein Dokument angehängt |
+| `ZIP_NO_CONTENT` | voucherZip-Response enthielt keinen verwertbaren Base64-Inhalt (z. B. `content: null`) |
+| `ZIP_NO_MATCH` | ZIP entpackt, aber kein Eintrag trifft das Dokument deterministisch |
+| `ZIP_AMBIGUOUS_MATCH` | Mehrere ZIP-Einträge passen — keine automatische Auswahl (kein Raten) |
+| `ZIP_MATCH_NOT_PDF` | ZIP-Eintrag gefunden, aber kein gültiger PDF-Header (`%PDF`) |
+| `FALLBACK_NOT_PDF` | voucherZip fehlgeschlagen; Fallback-Download erfolgreich, aber Inhalt ist kein PDF (z. B. Bild) |
+| `FALLBACK_FAILED` | voucherZip fehlgeschlagen; Fallback-Request ebenfalls fehlgeschlagen |
+
+> **Hinweis:** `hasPdf`-Metadaten aus `get_voucher_document_info` sind Hinweise, keine Garantie.
+> Der tatsächliche PDF-Abruf ist die maßgebliche Wahrheit. Wenn `hasPdf: false` und `FALLBACK_NOT_PDF` zurückkommt,
+> ist das Dokument wahrscheinlich ein Bild — manuell in sevDesk prüfen.
 
 ### Hinweise
 

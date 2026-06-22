@@ -66,13 +66,35 @@ export type VoucherBookingPlanIssueCode =
   | "IMAGE_READ_FAILED"
   | "DOCUMENT_INFO_READ_FAILED"
   | "STATUS_CHANGE_NOT_SUPPORTED"
-  | "DOCUMENT_DOWNLOAD_FAILED";
+  | "DOCUMENT_DOWNLOAD_FAILED"
+  // PDF-first voucher retrieval specific codes
+  | "VOUCHER_NO_DOCUMENT"
+  | "ZIP_NO_CONTENT"
+  | "ZIP_NO_MATCH"
+  | "ZIP_AMBIGUOUS_MATCH"
+  | "ZIP_MATCH_NOT_PDF"
+  | "FALLBACK_NOT_PDF"
+  | "FALLBACK_FAILED";
 
 export type VoucherBookingPlanIssue = {
   code: VoucherBookingPlanIssueCode;
   message: string;
   path?: string;
 };
+
+/**
+ * Typed error thrown by PDF retrieval internals so that specific failure codes
+ * can be surfaced to callers instead of a generic DOCUMENT_DOWNLOAD_FAILED.
+ */
+class VoucherPdfRetrievalError extends Error {
+  constructor(
+    public readonly code: VoucherBookingPlanIssueCode,
+    message: string
+  ) {
+    super(message);
+    this.name = "VoucherPdfRetrievalError";
+  }
+}
 
 export type VoucherPositionSummary = {
   voucherPosIdToReuse?: number;
@@ -714,18 +736,18 @@ export function decodeAndUnpackVoucherZipPayload(exportData: unknown): { entries
   const warnings: string[] = [];
 
   if (!content || content.trim().length === 0) {
-    throw new Error("Export/voucherZip did not return a base64 content payload");
+    throw new VoucherPdfRetrievalError("ZIP_NO_CONTENT", "Export/voucherZip did not return a base64 content payload");
   }
 
   const base64Content = content.trim();
   if (!/^[A-Za-z0-9+/=\r\n]+$/.test(base64Content)) {
-    throw new Error("Export/voucherZip content is not valid base64");
+    throw new VoucherPdfRetrievalError("ZIP_NO_CONTENT", "Export/voucherZip content is not valid base64");
   }
 
   let zipBytes: Buffer;
   zipBytes = Buffer.from(base64Content, "base64");
   if (zipBytes.length === 0) {
-    throw new Error("Export/voucherZip content is not valid base64");
+    throw new VoucherPdfRetrievalError("ZIP_NO_CONTENT", "Export/voucherZip content decoded to empty buffer");
   }
 
   const entries: VoucherZipEntry[] = [];
@@ -806,7 +828,7 @@ export function decodeAndUnpackVoucherZipPayload(exportData: unknown): { entries
   }
 
   if (entries.length === 0) {
-    throw new Error("No usable files found in Export/voucherZip payload");
+    throw new VoucherPdfRetrievalError("ZIP_NO_CONTENT", "No usable files found in Export/voucherZip payload");
   }
 
   return { entries, warnings };
@@ -883,46 +905,61 @@ async function downloadDocumentBytesViaVoucherZipInternal(
   const documentInfo = await getVoucherDocumentInfoInternal(client, voucherId);
   const filterCandidates: Record<string, unknown>[] = [{ id: voucherId }, { id: { "$eq": voucherId } }];
   const attemptErrors: string[] = [];
+  let lastTypedError: VoucherPdfRetrievalError | null = null;
 
   for (const filterCandidate of filterCandidates) {
-    const { data: exportData, error: exportError } = await callUntypedClientMethod(client, "GET", "/Export/voucherZip", {
-      params: {
-        query: {
-          download: false,
-          sevQuery: {
-            modelName: "Voucher",
-            objectName: "SevQuery",
-            limit: 1,
-            filter: filterCandidate,
+    try {
+      const { data: exportData, error: exportError } = await callUntypedClientMethod(client, "GET", "/Export/voucherZip", {
+        params: {
+          query: {
+            download: false,
+            sevQuery: {
+              modelName: "Voucher",
+              objectName: "SevQuery",
+              limit: 1,
+              filter: filterCandidate,
+            },
           },
         },
-      },
-    });
-    if (exportError) {
-      attemptErrors.push(
-        `Export/voucherZip request failed for filter ${JSON.stringify(filterCandidate)}: ${JSON.stringify(exportError)}`
-      );
-      continue;
-    }
+      });
+      if (exportError) {
+        attemptErrors.push(
+          `Export/voucherZip request failed for filter ${JSON.stringify(filterCandidate)}: ${JSON.stringify(exportError)}`
+        );
+        continue;
+      }
 
-    const { entries, warnings } = decodeAndUnpackVoucherZipPayload(exportData);
-    const picked = pickVoucherZipEntryForDocument(entries, documentId, documentInfo?.fileName ?? null);
-    const combinedWarnings = [...warnings, ...picked.warnings];
-    if (!picked.entry) {
-      attemptErrors.push(
-        `Export/voucherZip mapping failed for filter ${JSON.stringify(filterCandidate)}: ${combinedWarnings.join("; ")}`
-      );
-      continue;
-    }
+      // May throw VoucherPdfRetrievalError("ZIP_NO_CONTENT", ...) when content is absent.
+      const { entries, warnings } = decodeAndUnpackVoucherZipPayload(exportData);
+      const picked = pickVoucherZipEntryForDocument(entries, documentId, documentInfo?.fileName ?? null);
+      const combinedWarnings = [...warnings, ...picked.warnings];
+      if (!picked.entry) {
+        const isAmbiguous = picked.warnings.some((w) => /Multiple ZIP entries/i.test(w));
+        const matchCode: VoucherBookingPlanIssueCode = isAmbiguous ? "ZIP_AMBIGUOUS_MATCH" : "ZIP_NO_MATCH";
+        const matchMsg = `Export/voucherZip mapping failed for filter ${JSON.stringify(filterCandidate)}: ${combinedWarnings.join("; ")}`;
+        lastTypedError = new VoucherPdfRetrievalError(matchCode, matchMsg);
+        attemptErrors.push(matchMsg);
+        continue;
+      }
 
-    return {
-      bytes: picked.entry.bytes,
-      fileName: picked.entry.fileName.split("/").pop() ?? picked.entry.fileName,
-      warnings: [...combinedWarnings, `Document loaded via Export/voucherZip primary path from "${picked.entry.fileName}".`],
-    };
+      return {
+        bytes: picked.entry.bytes,
+        fileName: picked.entry.fileName.split("/").pop() ?? picked.entry.fileName,
+        warnings: [...combinedWarnings, `Document loaded via Export/voucherZip primary path from "${picked.entry.fileName}".`],
+      };
+    } catch (error) {
+      if (error instanceof VoucherPdfRetrievalError) {
+        lastTypedError = error;
+      }
+      attemptErrors.push(getErrorMessage(error));
+    }
   }
 
-  throw new Error(attemptErrors.join("; "));
+  const combinedMessage = attemptErrors.join("; ");
+  if (lastTypedError) {
+    throw new VoucherPdfRetrievalError(lastTypedError.code, combinedMessage);
+  }
+  throw new Error(combinedMessage);
 }
 
 function isPdfBuffer(bytes: Buffer): boolean {
@@ -936,15 +973,16 @@ async function downloadVoucherOriginalPdfInternal(
   const voucherData = await getVoucherByIdInternal(client, voucherId);
   const documentId = getVoucherDocumentId(voucherData as VoucherResponseData | undefined);
   if (!documentId) {
-    throw new Error("Voucher has no document attached");
+    throw new VoucherPdfRetrievalError("VOUCHER_NO_DOCUMENT", "Voucher has no document attached");
   }
   const documentInfo = await getVoucherDocumentInfoInternal(client, voucherId);
 
   try {
     const voucherZipResult = await downloadDocumentBytesViaVoucherZipInternal(client, voucherId, documentId);
     if (!isPdfBuffer(voucherZipResult.bytes)) {
-      throw new Error(
-        `Export/voucherZip mapping succeeded but selected file "${voucherZipResult.fileName}" is not a PDF`
+      throw new VoucherPdfRetrievalError(
+        "ZIP_MATCH_NOT_PDF",
+        `Export/voucherZip mapping succeeded but selected file "${voucherZipResult.fileName}" is not a valid PDF (missing %PDF header)`
       );
     }
 
@@ -969,17 +1007,25 @@ async function downloadVoucherOriginalPdfInternal(
       }
     );
     if (documentError) {
-      throw new Error(
+      throw new VoucherPdfRetrievalError(
+        "FALLBACK_FAILED",
         `Export/voucherZip primary retrieval failed: ${getErrorMessage(voucherZipError)}; ` +
-          `fallback /Document/{documentId} failed: ${JSON.stringify(documentError)}`
+          `fallback /Document/{documentId} request also failed: ${JSON.stringify(documentError)}`
       );
     }
     if (!(documentData instanceof ArrayBuffer)) {
-      throw new Error("Document download did not return raw bytes");
+      throw new VoucherPdfRetrievalError(
+        "FALLBACK_FAILED",
+        "Fallback /Document download did not return raw bytes"
+      );
     }
     const bytes = Buffer.from(documentData);
     if (!isPdfBuffer(bytes)) {
-      throw new Error("Fallback /Document download is not a PDF document");
+      throw new VoucherPdfRetrievalError(
+        "FALLBACK_NOT_PDF",
+        `Export/voucherZip primary retrieval failed: ${getErrorMessage(voucherZipError)}; ` +
+          "fallback /Document/{documentId} download succeeded but content is not a valid PDF (missing %PDF header) — document is likely an image"
+      );
     }
 
     const fileName = documentInfo?.fileName ?? `document-${documentId}.pdf`;
@@ -2249,18 +2295,36 @@ export const voucherTools = {
     description:
       "Read-only PDF-first tool that returns the original voucher PDF as base64 for Claude/Cowork review. " +
       "The MCP downloads GET /Export/voucherZip, decodes and unpacks ZIP payloads server-side, then matches the PDF deterministically. " +
-      "If voucherZip retrieval fails, /Document/{documentId} is used as explicit fallback with warnings.",
+      "If voucherZip retrieval fails, /Document/{documentId} is used as explicit fallback with warnings. " +
+      "On failure, a structured error object is returned with a specific error code: " +
+      "VOUCHER_NO_DOCUMENT (no document attached), ZIP_NO_CONTENT (no usable ZIP payload), " +
+      "ZIP_NO_MATCH (no entry matched the document), ZIP_AMBIGUOUS_MATCH (multiple candidates), " +
+      "ZIP_MATCH_NOT_PDF (matched entry is not a PDF), FALLBACK_NOT_PDF (fallback content is not a PDF — document is likely an image), " +
+      "FALLBACK_FAILED (fallback request itself failed).",
     inputSchema: z.object({
       voucherId: z.number().int().positive().describe("The ID of the voucher"),
     }),
-    handler: async (client: SevdeskClient, params: { voucherId: number }) =>
-      downloadVoucherOriginalPdfInternal(client, params.voucherId),
+    handler: async (client: SevdeskClient, params: { voucherId: number }) => {
+      try {
+        const data = await downloadVoucherOriginalPdfInternal(client, params.voucherId);
+        return { ok: true as const, voucherId: params.voucherId, data, errors: [], warnings: [] };
+      } catch (error) {
+        const code = error instanceof VoucherPdfRetrievalError ? error.code : "DOCUMENT_DOWNLOAD_FAILED";
+        return {
+          ok: false as const,
+          voucherId: params.voucherId,
+          data: null,
+          errors: [createIssue(code, getErrorMessage(error))],
+          warnings: [],
+        };
+      }
+    },
   },
 
   get_voucher_original_pdf_batch: {
     description:
       "Read-only batch variant of get_voucher_original_pdf. Returns PDF-first original PDF payloads for up to 20 vouchers. " +
-      "Per-voucher errors are returned in result items; top-level ok=false when at least one voucher fails.",
+      "Per-voucher errors are returned in result items with specific error codes; top-level ok=false when at least one voucher fails.",
     inputSchema: z.object({
       voucherIds: z.array(z.number().int().positive()).min(1).max(20),
     }),
@@ -2271,15 +2335,11 @@ export const voucherTools = {
             const data = await downloadVoucherOriginalPdfInternal(client, voucherId);
             return { voucherId, ok: true, data, errors: [], warnings: [] };
           } catch (error) {
+            const code = error instanceof VoucherPdfRetrievalError ? error.code : "DOCUMENT_DOWNLOAD_FAILED";
             return {
               voucherId,
               ok: false,
-              errors: [
-                createIssue(
-                  "DOCUMENT_DOWNLOAD_FAILED",
-                  `Original voucher PDF could not be loaded: ${getErrorMessage(error)}`
-                ),
-              ],
+              errors: [createIssue(code, getErrorMessage(error))],
               warnings: [],
             };
           }
