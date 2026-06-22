@@ -1007,7 +1007,7 @@ async function downloadVoucherOriginalPdfInternal(
     if (!isPdfBuffer(voucherZipResult.bytes)) {
       throw new VoucherPdfRetrievalError(
         "ZIP_MATCH_NOT_PDF",
-        `Export/voucherZip mapping succeeded but selected file "${voucherZipResult.fileName}" is not a valid PDF (missing %PDF header)`
+        `Export/voucherZip mapping succeeded but selected file "${voucherZipResult.fileName}" failed PDF format validation`
       );
     }
 
@@ -1052,7 +1052,7 @@ async function downloadVoucherOriginalPdfInternal(
     if (!isPdfBuffer(bytes)) {
       throw new VoucherPdfRetrievalError(
         "FALLBACK_NOT_PDF",
-        `${zipPrimaryFailedPrefix(voucherZipError)}; fallback /Document/{documentId} download succeeded but content is not a valid PDF (missing %PDF header) — document is likely an image`,
+        `${zipPrimaryFailedPrefix(voucherZipError)}; fallback /Document/{documentId} download succeeded but failed PDF format validation — document is likely an image`,
         zipCause
       );
     }
