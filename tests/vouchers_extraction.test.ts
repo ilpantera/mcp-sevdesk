@@ -11,6 +11,29 @@ import {
 } from "../src/tools/vouchers.js";
 import type { SevdeskClient } from "../src/client.js";
 
+// ---------------------------------------------------------------------------
+// Mock tesseract.js to avoid network language-data downloads during tests.
+// Individual tests override recognize() to simulate OCR success or failure.
+// ---------------------------------------------------------------------------
+import { createWorker as _createWorker } from "tesseract.js";
+vi.mock("tesseract.js", () => ({
+  createWorker: vi.fn(),
+}));
+const mockedCreateWorker = vi.mocked(_createWorker);
+
+/** Configure the OCR mock to return the given text for one call. */
+function mockOcrReturns(text: string): void {
+  mockedCreateWorker.mockResolvedValueOnce({
+    recognize: vi.fn().mockResolvedValue({ data: { text } }),
+    terminate: vi.fn().mockResolvedValue(undefined),
+  } as unknown as Awaited<ReturnType<typeof _createWorker>>);
+}
+
+/** Configure the OCR mock to throw (simulates a hard OCR error). */
+function mockOcrThrows(message: string): void {
+  mockedCreateWorker.mockRejectedValueOnce(new Error(message));
+}
+
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
 /**
@@ -30,6 +53,31 @@ function makePdfWithoutText(): Buffer {
 /** Minimal JPEG header bytes */
 function makeJpegBuffer(): Buffer {
   return Buffer.from([0xff, 0xd8, 0xff, 0xe0, 0x00, 0x10]);
+}
+
+/**
+ * A minimal but complete JPEG with both SOI (FF D8 FF) and EOI (FF D9) markers.
+ * extractFirstJpegFromPdf() requires both markers to extract the image.
+ */
+function makeCompleteJpeg(): Buffer {
+  return Buffer.from([
+    0xff, 0xd8, 0xff, 0xe0, // SOI + APP0 marker
+    0x00, 0x10,             // APP0 length
+    0x4a, 0x46, 0x49, 0x46, 0x00, // "JFIF\0"
+    0x01, 0x01,             // version
+    0x00,                   // aspect ratio units
+    0x00, 0x01, 0x00, 0x01, // pixel aspect ratio
+    0x00, 0x00,             // thumbnail dimensions
+    0xff, 0xd9,             // EOI
+  ]);
+}
+
+/** A minimal PDF that embeds a complete JPEG image – simulates a phone-scanner PDF. */
+function makePdfWithEmbeddedJpeg(): Buffer {
+  const jpeg = makeCompleteJpeg();
+  const prefix = Buffer.from("%PDF-1.4\n1 0 obj\n<< /Filter /DCTDecode >>\nstream\n", "utf8");
+  const suffix = Buffer.from("\nendstream\nendobj\n%%EOF", "utf8");
+  return Buffer.concat([prefix, jpeg, suffix]);
 }
 
 /** Minimal PNG header bytes */
@@ -126,7 +174,8 @@ describe("extract_voucher_document_text", () => {
     expect(result.warnings[0]).toMatch(/no text layer|text extraction/i);
   });
 
-  it("returns source=none with warning for JPEG document", async () => {
+  it("returns source=none with OCR warning for JPEG document when OCR yields no text", async () => {
+    mockOcrReturns(""); // OCR produces nothing → source stays "none"
     const GET = buildGetMock(77, makeJpegBuffer());
 
     const result = await voucherTools.extract_voucher_document_text.handler(
@@ -137,10 +186,27 @@ describe("extract_voucher_document_text", () => {
     expect(result.source).toBe("none");
     expect(result.text).toBe("");
     expect(result.warnings.length).toBeGreaterThan(0);
-    expect(result.warnings[0]).toMatch(/image/i);
+    expect(result.warnings.some((w) => /ocr|image/i.test(w))).toBe(true);
   });
 
-  it("returns source=none with warning for PNG document", async () => {
+  it("returns source=ocr with text for JPEG document when OCR succeeds", async () => {
+    const ocrText = "Lieferant GmbH\nRechnungsnummer: RE-2024-001\nGesamtbetrag 119,00 EUR";
+    mockOcrReturns(ocrText);
+    const GET = buildGetMock(77, makeJpegBuffer());
+
+    const result = await voucherTools.extract_voucher_document_text.handler(
+      { GET } as unknown as SevdeskClient,
+      { voucherId: 1 }
+    );
+
+    expect(result.source).toBe("ocr");
+    expect(result.text).toBe(ocrText);
+    expect(result.pages).toBe(1);
+    expect(result.warnings).toHaveLength(0);
+  });
+
+  it("returns source=none with OCR warning for PNG document when OCR yields no text", async () => {
+    mockOcrReturns(""); // OCR produces nothing
     const GET = buildGetMock(78, makePngBuffer());
 
     const result = await voucherTools.extract_voucher_document_text.handler(
@@ -150,6 +216,50 @@ describe("extract_voucher_document_text", () => {
 
     expect(result.source).toBe("none");
     expect(result.warnings.length).toBeGreaterThan(0);
+  });
+
+  it("returns source=ocr for scanned PDF with embedded JPEG when OCR succeeds", async () => {
+    const ocrText = "Lieferant GmbH\nRechnungsnummer: RE-2024-099\nGesamtbetrag 238,00 EUR";
+    mockOcrReturns(ocrText);
+    const GET = buildGetMock(56, makePdfWithEmbeddedJpeg());
+
+    const result = await voucherTools.extract_voucher_document_text.handler(
+      { GET } as unknown as SevdeskClient,
+      { voucherId: 1 }
+    );
+
+    expect(result.source).toBe("ocr");
+    expect(result.text).toBe(ocrText);
+    // makePdfWithEmbeddedJpeg() has a minimal PDF structure (no xref table, no trailer) that
+    // causes pdf-parse to throw "Invalid PDF structure". The resulting parse-failure warning
+    // is propagated alongside the successful OCR result.
+    expect(result.warnings.some((w) => /pdf|text layer|extraction failed/i.test(w))).toBe(true);
+  });
+
+  it("returns source=none with warning when OCR throws a hard error", async () => {
+    mockOcrThrows("WASM init failed");
+    const GET = buildGetMock(79, makeJpegBuffer());
+
+    const result = await voucherTools.extract_voucher_document_text.handler(
+      { GET } as unknown as SevdeskClient,
+      { voucherId: 1 }
+    );
+
+    expect(result.source).toBe("none");
+    expect(result.warnings.some((w) => /OCR failed/i.test(w))).toBe(true);
+  });
+
+  it("returns source=none with warning when OCR throws on a PNG document", async () => {
+    mockOcrThrows("WASM out of memory");
+    const GET = buildGetMock(80, makePngBuffer());
+
+    const result = await voucherTools.extract_voucher_document_text.handler(
+      { GET } as unknown as SevdeskClient,
+      { voucherId: 1 }
+    );
+
+    expect(result.source).toBe("none");
+    expect(result.warnings.some((w) => /OCR failed/i.test(w))).toBe(true);
   });
 
   it("throws when voucher has no document attached", async () => {
@@ -414,7 +524,8 @@ describe("extract_voucher_facts – text heuristic path", () => {
     expect(result.warnings.length).toBeGreaterThan(0);
   });
 
-  it("returns nulls and warnings for image documents", async () => {
+  it("returns nulls and warnings for image documents when OCR yields no text", async () => {
+    mockOcrReturns(""); // OCR produces nothing → no facts can be extracted
     const GET = buildGetMock(34, makeJpegBuffer());
 
     const result = await voucherTools.extract_voucher_facts.handler(
@@ -425,6 +536,23 @@ describe("extract_voucher_facts – text heuristic path", () => {
     expect(result.source).toBe("none");
     expect(result.supplier).toBeNull();
     expect(result.warnings.length).toBeGreaterThan(0);
+  });
+
+  it("returns source=ocr with extracted facts for image document when OCR succeeds", async () => {
+    const ocrText = "Lieferant GmbH\nRechnungsnummer: RE-2024-007\nRechnungsdatum: 15.01.2024\nGesamtbetrag 119,00 EUR";
+    mockOcrReturns(ocrText);
+    const GET = buildGetMock(35, makeJpegBuffer());
+
+    const result = await voucherTools.extract_voucher_facts.handler(
+      { GET } as unknown as SevdeskClient,
+      { voucherId: 1 }
+    );
+
+    expect(result.source).toBe("ocr");
+    expect(result.supplier).toContain("GmbH");
+    expect(result.invoiceNumber).toBe("RE-2024-007");
+    expect(result.currency).toBe("EUR");
+    expect(result.totals.gross).toBeCloseTo(119);
   });
 });
 
