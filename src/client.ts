@@ -9,18 +9,19 @@ type SevdeskClientMetadata = {
 };
 
 export function createSevdeskClient(apiToken: string) {
+  const baseUrl = SEVDESK_API_BASE_URL;
   const defaultHeaders = {
     Authorization: apiToken,
     Accept: "application/json",
   };
 
   return Object.assign(createClient<paths>({
-    baseUrl: SEVDESK_API_BASE_URL,
+    baseUrl,
     headers: {
       ...defaultHeaders,
     },
   }), {
-    baseUrl: SEVDESK_API_BASE_URL,
+    baseUrl,
     defaultHeaders,
   });
 }

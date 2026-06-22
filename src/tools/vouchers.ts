@@ -1219,7 +1219,7 @@ async function validateVoucherUploadFilePath(
   try {
     const headerBuffer = Buffer.alloc(4);
     const { bytesRead } = await fileHandle.read(headerBuffer, 0, headerBuffer.length, 0);
-    if (!isPdfBuffer(headerBuffer.subarray(0, bytesRead))) {
+    if (bytesRead < 4 || !isPdfBuffer(headerBuffer)) {
       throw new VoucherUploadError("FILE_NOT_PDF", `File is not a valid PDF document: ${filePath}`);
     }
   } finally {
@@ -1263,6 +1263,8 @@ async function uploadVoucherFileFromPathInternal(
 
   let response: Response;
   try {
+    // `form-data` produces a Node Readable stream rather than the DOM FormData type accepted by TypeScript's BodyInit.
+    // Node's fetch implementation supports this at runtime, so the cast keeps the code aligned with the actual runtime contract.
     const requestBody = form as unknown as BodyInit;
     response = await fetch(buildClientUrl(client, "/Voucher/Factory/uploadTempFile"), {
       method: "POST",
@@ -1270,9 +1272,8 @@ async function uploadVoucherFileFromPathInternal(
         ...client.defaultHeaders,
         ...form.getHeaders(),
       },
-      // `form-data` exposes a Node Readable stream, so we cast to BodyInit for Node's fetch runtime.
       body: requestBody,
-      // Node fetch requires duplex for streamed request bodies such as form-data's Readable stream.
+      // Node fetch requires `duplex: "half"` whenever the request body is streamed, which is the case for form-data.
       duplex: "half",
     } as RequestInit & { duplex: "half" });
   } catch (error) {
