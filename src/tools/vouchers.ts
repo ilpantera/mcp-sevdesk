@@ -80,7 +80,10 @@ export type VoucherBookingPlanIssueCode =
   | "PDF_BASE64_INVALID"
   | "PDF_NOT_VALID"
   | "PDF_UPLOAD_FAILED"
-  | "VOUCHER_CREATE_FAILED";
+  | "PDF_ATTACH_FAILED"
+  | "PDF_ATTACH_VERIFY_FAILED"
+  | "VOUCHER_CREATE_FAILED"
+  | "VOUCHER_VERIFY_FAILED";
 
 export type VoucherBookingPlanIssue = {
   code: VoucherBookingPlanIssueCode;
@@ -198,6 +201,22 @@ type VoucherOriginalPdfResult = {
 type CreateVoucherFromPdfResult = {
   ok: boolean;
   voucherId: number | null;
+  documentId: number | null;
+  fileName: string;
+  warnings: string[];
+  errors: VoucherBookingPlanIssue[];
+};
+
+type CreateDraftVoucherResult = {
+  ok: boolean;
+  voucherId: number | null;
+  warnings: string[];
+  errors: VoucherBookingPlanIssue[];
+};
+
+type AttachPdfToVoucherResult = {
+  ok: boolean;
+  voucherId: number;
   documentId: number | null;
   fileName: string;
   warnings: string[];
@@ -375,6 +394,14 @@ function getErrorMessage(error: unknown): string {
     return error.message;
   }
   return String(error);
+}
+
+function getVoucherIdFromError(error: unknown): number | undefined {
+  return getNumberValue(asRecord(error)?.voucherId);
+}
+
+function getWorkflowPhaseFromError(error: unknown): string | undefined {
+  return getStringValue(asRecord(error)?.phase);
 }
 
 function createIssue(
@@ -1048,6 +1075,229 @@ function getDocumentIdFromSaveVoucherResult(saveResult: unknown): number | undef
   const saveRecord = asRecord(saveResult);
   const voucherRecord = asRecord(saveRecord?.voucher);
   return getNumberValue(asRecord(voucherRecord?.document)?.id);
+}
+
+function normalizeVoucherAmountFields(sum?: number, sumNet?: number): Record<string, string> {
+  const normalizedSum = sum !== undefined ? roundCurrency(sum) : undefined;
+  const normalizedSumNet = sumNet !== undefined ? roundCurrency(sumNet) : normalizedSum;
+  const effectiveSum = normalizedSum ?? normalizedSumNet;
+  if (effectiveSum === undefined) {
+    return {};
+  }
+
+  const serialized = String(effectiveSum);
+  return {
+    sum: serialized,
+    sumNet: String(normalizedSumNet ?? effectiveSum),
+  };
+}
+
+function validatePdfPayload(
+  fileName: string,
+  contentBase64: string
+): { fileName: string; normalizedBase64: string; decodedBytes: Buffer } | { fileName: string; error: VoucherBookingPlanIssue } {
+  const trimmedFileName = fileName.trim();
+  if (!trimmedFileName) {
+    return {
+      fileName,
+      error: createIssue("PDF_PAYLOAD_MISSING", "fileName is required"),
+    };
+  }
+
+  const normalizedBase64 = contentBase64.trim();
+  if (!normalizedBase64) {
+    return {
+      fileName: trimmedFileName,
+      error: createIssue("PDF_PAYLOAD_MISSING", "contentBase64 is required"),
+    };
+  }
+
+  const decodedBytes = decodeBase64Strict(normalizedBase64);
+  if (!decodedBytes) {
+    return {
+      fileName: trimmedFileName,
+      error: createIssue("PDF_BASE64_INVALID", "contentBase64 is not valid base64 data"),
+    };
+  }
+
+  if (!isPdfBuffer(decodedBytes)) {
+    return {
+      fileName: trimmedFileName,
+      error: createIssue("PDF_NOT_VALID", "Decoded payload is not a valid PDF document"),
+    };
+  }
+
+  return { fileName: trimmedFileName, normalizedBase64, decodedBytes };
+}
+
+function buildDraftVoucherBody(params: {
+  voucherDate: string;
+  description?: string;
+  supplierName?: string;
+  creditDebit: "C" | "D";
+  voucherId?: number;
+}): Record<string, unknown> {
+  return {
+    ...(params.voucherId !== undefined && { id: params.voucherId }),
+    objectName: "Voucher",
+    mapAll: true,
+    voucherDate: params.voucherDate,
+    status: 50,
+    creditDebit: params.creditDebit,
+    voucherType: "VOU",
+    ...(params.description && { description: params.description }),
+    ...(params.supplierName && { supplierName: params.supplierName }),
+  };
+}
+
+async function verifyVoucherReadableInternal(
+  client: SevdeskClient,
+  voucherId: number
+): Promise<Record<string, unknown>> {
+  const voucherData = await getVoucherByIdInternal(client, voucherId);
+  const voucherRecord = unwrapFirstObject(voucherData);
+  const visibleVoucherId = getNumberValue(voucherRecord?.id);
+  if (!voucherRecord || visibleVoucherId !== voucherId) {
+    throw new Error(`Voucher ${voucherId} could not be re-read after saveVoucher`);
+  }
+  return voucherRecord;
+}
+
+async function createDraftVoucherInternal(
+  client: SevdeskClient,
+  params: {
+    voucherDate: string;
+    description?: string;
+    supplierName?: string;
+    creditDebit: "C" | "D";
+  }
+): Promise<{ voucherId: number; voucherRecord: Record<string, unknown> }> {
+  const { data: saveData, error: saveError } = await callUntypedClientMethod(
+    client,
+    "POST",
+    "/Voucher/Factory/saveVoucher",
+    {
+      body: {
+        voucher: buildDraftVoucherBody(params),
+        voucherPosSave: [],
+      },
+    }
+  );
+  if (saveError) {
+    throw new Error(`Voucher creation failed: ${JSON.stringify(saveError)}`);
+  }
+
+  const voucherId = getVoucherIdFromSaveVoucherResult(saveData);
+  if (!voucherId) {
+    throw new Error("Voucher creation succeeded but sevDesk did not return a numeric voucherId");
+  }
+
+  try {
+    const voucherRecord = await verifyVoucherReadableInternal(client, voucherId);
+    return { voucherId, voucherRecord };
+  } catch (error) {
+    throw Object.assign(new Error(getErrorMessage(error)), { voucherId, phase: "verify" });
+  }
+}
+
+function buildVoucherAttachBody(
+  voucherId: number,
+  voucherRecord: Record<string, unknown>,
+  fallbackCreditDebit?: "C" | "D"
+): Record<string, unknown> {
+  const supplier = asRecord(voucherRecord.supplier);
+  const supplierId = getNumberValue(supplier?.id);
+  const supplierObjectName = getStringValue(supplier?.objectName);
+  const supplierName = getStringValue(voucherRecord.supplierName);
+  const creditDebit = getStringValue(voucherRecord.creditDebit);
+
+  return {
+    id: voucherId,
+    objectName: "Voucher",
+    mapAll: true,
+    voucherDate: getStringValue(voucherRecord.voucherDate) ?? new Date().toISOString().slice(0, 10),
+    status: getNumberValue(voucherRecord.status) ?? 50,
+    creditDebit: creditDebit === "C" || creditDebit === "D" ? creditDebit : (fallbackCreditDebit ?? "D"),
+    voucherType: getStringValue(voucherRecord.voucherType) ?? "VOU",
+    ...(getStringValue(voucherRecord.description) && { description: getStringValue(voucherRecord.description) }),
+    ...(supplierId !== undefined
+      ? {
+          supplier: {
+            id: supplierId,
+            objectName: supplierObjectName ?? "Contact",
+          },
+        }
+      : supplierName
+        ? { supplierName }
+        : {}),
+  };
+}
+
+async function uploadVoucherTempFileInternal(
+  client: SevdeskClient,
+  params: { fileName: string; decodedBytes: Buffer }
+): Promise<string> {
+  const formData = new FormData();
+  formData.append(
+    "file",
+    new Blob([Uint8Array.from(params.decodedBytes)], { type: "application/pdf" }),
+    params.fileName
+  );
+
+  const { data: uploadData, error: uploadError } = await callUntypedClientMethod(
+    client,
+    "POST",
+    "/Voucher/Factory/uploadTempFile",
+    { body: formData }
+  );
+  if (uploadError) {
+    throw new Error(`PDF attach upload failed: ${JSON.stringify(uploadError)}`);
+  }
+
+  const uploadedFileName = getUploadedTempFilename(uploadData);
+  if (!uploadedFileName) {
+    throw new Error("PDF attach upload succeeded but sevDesk did not return a temporary filename");
+  }
+
+  return uploadedFileName;
+}
+
+async function attachPdfToVoucherInternal(
+  client: SevdeskClient,
+  params: {
+    voucherId: number;
+    fileName: string;
+    decodedBytes: Buffer;
+    voucherRecord?: Record<string, unknown>;
+    creditDebit?: "C" | "D";
+  }
+): Promise<{ documentId: number; voucherRecord: Record<string, unknown> }> {
+  const voucherRecord = params.voucherRecord ?? (await verifyVoucherReadableInternal(client, params.voucherId));
+  const uploadedFileName = await uploadVoucherTempFileInternal(client, {
+    fileName: params.fileName,
+    decodedBytes: params.decodedBytes,
+  });
+
+  const { error: attachError } = await callUntypedClientMethod(client, "POST", "/Voucher/Factory/saveVoucher", {
+    body: {
+      voucher: buildVoucherAttachBody(params.voucherId, voucherRecord, params.creditDebit),
+      filename: uploadedFileName,
+    },
+  });
+  if (attachError) {
+    throw new Error(`PDF attach failed: ${JSON.stringify(attachError)}`);
+  }
+
+  const verifiedVoucher = await verifyVoucherReadableInternal(client, params.voucherId);
+  const documentId = getVoucherDocumentId(verifiedVoucher as VoucherResponseData | undefined);
+  if (!documentId) {
+    throw Object.assign(
+      new Error(`Voucher ${params.voucherId} could not be re-read with an attached document after upload`),
+      { voucherId: params.voucherId, phase: "attach-verify" }
+    );
+  }
+
+  return { documentId, voucherRecord: verifiedVoucher };
 }
 
 async function downloadVoucherOriginalPdfInternal(
@@ -1850,37 +2100,148 @@ export const voucherTools = {
     },
   },
 
+  create_draft_voucher: {
+    description:
+      "Write tool: create a new sevDesk draft voucher first, then verify it can be read back before any file attachment is attempted.",
+    inputSchema: z.object({
+      voucherDate: z.string().optional().describe("Voucher date. Prefer YYYY-MM-DD or YYYY-MM-DDTHH:mm:ss"),
+      description: z.string().optional().describe("Optional voucher description"),
+      supplierName: z.string().optional().describe("Optional supplier name"),
+      creditDebit: z.enum(["C", "D"]).optional().describe("Voucher direction: C=credit, D=debit (default D)"),
+    }).strict(),
+    handler: async (client: SevdeskClient, params: {
+      voucherDate?: string;
+      description?: string;
+      supplierName?: string;
+      creditDebit?: "C" | "D";
+    }): Promise<CreateDraftVoucherResult> => {
+      const warnings: string[] = [];
+      const voucherDate = params.voucherDate ?? new Date().toISOString().slice(0, 10);
+      if (!params.voucherDate) {
+        warnings.push("voucherDate was not provided. Defaulted to current date.");
+      }
+      const creditDebit = params.creditDebit ?? "D";
+      if (!params.creditDebit) {
+        warnings.push("creditDebit was not provided. Defaulted to D (debit expense voucher).");
+      }
+
+      try {
+        const { voucherId } = await createDraftVoucherInternal(client, {
+          voucherDate,
+          description: params.description,
+          supplierName: params.supplierName,
+          creditDebit,
+        });
+        return {
+          ok: true,
+          voucherId,
+          warnings,
+          errors: [],
+        };
+      } catch (error) {
+        const message = getErrorMessage(error);
+        const voucherId = getVoucherIdFromError(error) ?? null;
+        return {
+          ok: false,
+          voucherId,
+          warnings,
+          errors: [
+            createIssue(
+              getWorkflowPhaseFromError(error) === "verify" ? "VOUCHER_VERIFY_FAILED" : "VOUCHER_CREATE_FAILED",
+              message
+            ),
+          ],
+        };
+      }
+    },
+  },
+
+  attach_pdf_to_voucher: {
+    description:
+      "Write tool: attach an uploaded PDF payload to an existing sevDesk voucher. Validates the PDF, uploads it as multipart/form-data, attaches it to the voucher, and verifies the document is visible afterwards.",
+    inputSchema: z.object({
+      voucherId: z.number().int().positive().describe("The ID of the existing voucher"),
+      fileName: z.string().min(1).describe("Original PDF file name from the client"),
+      contentBase64: z.string().min(1).describe("Base64-encoded PDF bytes"),
+      creditDebit: z.enum(["C", "D"]).optional().describe("Optional fallback when the existing voucher has no creditDebit"),
+    }).strict(),
+    handler: async (client: SevdeskClient, params: {
+      voucherId: number;
+      fileName: string;
+      contentBase64: string;
+      creditDebit?: "C" | "D";
+    }): Promise<AttachPdfToVoucherResult> => {
+      const warnings: string[] = [];
+      const payload = validatePdfPayload(params.fileName, params.contentBase64);
+      if ("error" in payload) {
+        return {
+          ok: false,
+          voucherId: params.voucherId,
+          documentId: null,
+          fileName: payload.fileName,
+          warnings,
+          errors: [payload.error],
+        };
+      }
+
+      try {
+        const { documentId } = await attachPdfToVoucherInternal(client, {
+          voucherId: params.voucherId,
+          fileName: payload.fileName,
+          decodedBytes: payload.decodedBytes,
+          creditDebit: params.creditDebit,
+        });
+        return {
+          ok: true,
+          voucherId: params.voucherId,
+          documentId,
+          fileName: payload.fileName,
+          warnings,
+          errors: [],
+        };
+      } catch (error) {
+        const message = getErrorMessage(error);
+        return {
+          ok: false,
+          voucherId: params.voucherId,
+          documentId: null,
+          fileName: payload.fileName,
+          warnings,
+          errors: [
+            createIssue(
+              getWorkflowPhaseFromError(error) === "attach-verify" ? "PDF_ATTACH_VERIFY_FAILED" : "PDF_ATTACH_FAILED",
+              message
+            ),
+          ],
+        };
+      }
+    },
+  },
+
   upload_voucher_file: {
-    description: "Upload a file (receipt image/PDF) for a voucher",
+    description: "Backward-compatible alias for attach_pdf_to_voucher",
     inputSchema: z.object({
       voucherId: z.number().describe("The ID of the voucher"),
       fileName: z.string().describe("Name of the file"),
       base64Content: z.string().describe("Base64 encoded file content"),
       creditDebit: z.enum(["C", "D"]).optional().describe("C=Credit, D=Debit. Default: D"),
     }),
-    handler: async (client: SevdeskClient, params: {
-      voucherId: number;
-      fileName: string;
-      base64Content: string;
-      creditDebit?: "C" | "D";
-    }) => {
-      const { data, error } = await client.POST("/Voucher/Factory/uploadTempFile", {
-        body: {
-          content: params.base64Content,
-          filename: params.fileName,
-          base64: true,
-          creditDebit: params.creditDebit ?? "D",
-        } as any,
-      });
-      if (error) throw new Error(JSON.stringify(error));
-      return data;
-    },
+    handler: async (
+      client: SevdeskClient,
+      params: { voucherId: number; fileName: string; base64Content: string; creditDebit?: "C" | "D" }
+    ): Promise<AttachPdfToVoucherResult> =>
+      voucherTools.attach_pdf_to_voucher.handler(client, {
+        voucherId: params.voucherId,
+        fileName: params.fileName,
+        contentBase64: params.base64Content,
+        creditDebit: params.creditDebit,
+      }),
   },
 
   create_voucher_from_pdf: {
     description:
-      "Write tool: create a new sevDesk voucher directly from an uploaded PDF payload (no local file path). " +
-      "Validates base64 input and PDF signature before uploading and creating the voucher.",
+      "Write tool: create a new sevDesk draft voucher first, verify it exists, then attach an uploaded PDF payload. " +
+      "Validates base64 input and PDF signature before the attach phase and returns phase-specific errors.",
     inputSchema: z.object({
       fileName: z.string().min(1).describe("Original PDF file name from the client"),
       contentBase64: z.string().min(1).describe("Base64-encoded PDF bytes"),
@@ -1898,51 +2259,15 @@ export const voucherTools = {
       creditDebit?: "C" | "D";
     }): Promise<CreateVoucherFromPdfResult> => {
       const warnings: string[] = [];
-      const trimmedFileName = params.fileName.trim();
-      const normalizedBase64 = params.contentBase64.trim();
-
-      if (!trimmedFileName) {
+      const payload = validatePdfPayload(params.fileName, params.contentBase64);
+      if ("error" in payload) {
         return {
           ok: false,
           voucherId: null,
           documentId: null,
-          fileName: params.fileName,
+          fileName: payload.fileName,
           warnings,
-          errors: [createIssue("PDF_PAYLOAD_MISSING", "fileName is required")],
-        };
-      }
-
-      if (!normalizedBase64) {
-        return {
-          ok: false,
-          voucherId: null,
-          documentId: null,
-          fileName: trimmedFileName,
-          warnings,
-          errors: [createIssue("PDF_PAYLOAD_MISSING", "contentBase64 is required")],
-        };
-      }
-
-      const decodedBytes = decodeBase64Strict(normalizedBase64);
-      if (!decodedBytes) {
-        return {
-          ok: false,
-          voucherId: null,
-          documentId: null,
-          fileName: trimmedFileName,
-          warnings,
-          errors: [createIssue("PDF_BASE64_INVALID", "contentBase64 is not valid base64 data")],
-        };
-      }
-
-      if (!isPdfBuffer(decodedBytes)) {
-        return {
-          ok: false,
-          voucherId: null,
-          documentId: null,
-          fileName: trimmedFileName,
-          warnings,
-          errors: [createIssue("PDF_NOT_VALID", "Decoded payload is not a valid PDF document")],
+          errors: [payload.error],
         };
       }
 
@@ -1955,88 +2280,67 @@ export const voucherTools = {
         warnings.push("creditDebit was not provided. Defaulted to D (debit expense voucher).");
       }
 
-      const { data: uploadData, error: uploadError } = await client.POST("/Voucher/Factory/uploadTempFile", {
-        body: {
-          content: normalizedBase64,
-          filename: trimmedFileName,
-          base64: true,
+      let voucherId: number | null = null;
+      let voucherRecord: Record<string, unknown> | undefined;
+      try {
+        const draftVoucher = await createDraftVoucherInternal(client, {
+          voucherDate,
+          description: params.description,
+          supplierName: params.supplierName,
           creditDebit,
-        } as any,
-      });
-      if (uploadError) {
+        });
+        voucherId = draftVoucher.voucherId;
+        voucherRecord = draftVoucher.voucherRecord;
+      } catch (error) {
+        const message = getErrorMessage(error);
+        voucherId = getVoucherIdFromError(error) ?? voucherId;
         return {
           ok: false,
-          voucherId: null,
+          voucherId,
           documentId: null,
-          fileName: trimmedFileName,
-          warnings,
-          errors: [createIssue("PDF_UPLOAD_FAILED", `PDF upload failed: ${JSON.stringify(uploadError)}`)],
-        };
-      }
-
-      const uploadedFileName = getUploadedTempFilename(uploadData);
-      if (!uploadedFileName) {
-        return {
-          ok: false,
-          voucherId: null,
-          documentId: null,
-          fileName: trimmedFileName,
+          fileName: payload.fileName,
           warnings,
           errors: [
             createIssue(
-              "PDF_UPLOAD_FAILED",
-              "PDF upload succeeded but sevDesk did not return a temporary filename for saveVoucher"
+              getWorkflowPhaseFromError(error) === "verify" ? "VOUCHER_VERIFY_FAILED" : "VOUCHER_CREATE_FAILED",
+              message
             ),
           ],
         };
       }
 
-      const voucherBody: Record<string, unknown> = {
-        objectName: "Voucher",
-        mapAll: true,
-        voucherDate,
-        status: 50,
-        creditDebit,
-        voucherType: "VOU",
-      };
-      if (params.description) voucherBody.description = params.description;
-      if (params.supplierName) voucherBody.supplierName = params.supplierName;
-
-      const { data: saveData, error: saveError } = await (client.POST as any)("/Voucher/Factory/saveVoucher", {
-        body: {
-          voucher: voucherBody,
-          voucherPosSave: [],
-          filename: uploadedFileName,
-        },
-      });
-      if (saveError) {
+      try {
+        const attachResult = await attachPdfToVoucherInternal(client, {
+          voucherId: voucherId!,
+          fileName: payload.fileName,
+          decodedBytes: payload.decodedBytes,
+          voucherRecord,
+          creditDebit,
+        });
+        return {
+          ok: true,
+          voucherId,
+          documentId: attachResult.documentId,
+          fileName: payload.fileName,
+          warnings,
+          errors: [],
+        };
+      } catch (error) {
+        const message = getErrorMessage(error);
         return {
           ok: false,
-          voucherId: null,
+          voucherId: voucherId!,
           documentId: null,
-          fileName: trimmedFileName,
+          fileName: payload.fileName,
           warnings,
-          errors: [createIssue("VOUCHER_CREATE_FAILED", `Voucher creation failed: ${JSON.stringify(saveError)}`)],
+          errors: [
+            createIssue(
+              getWorkflowPhaseFromError(error) === "attach-verify" ? "PDF_ATTACH_VERIFY_FAILED" : "PDF_ATTACH_FAILED",
+              message
+            ),
+          ],
         };
       }
-
-      const voucherId = getVoucherIdFromSaveVoucherResult(saveData) ?? null;
-      const documentId = getDocumentIdFromSaveVoucherResult(saveData) ?? null;
-      if (!voucherId) {
-        warnings.push("Voucher was created but response did not include a numeric voucherId.");
-      }
-      if (!documentId) {
-        warnings.push("Response did not include a numeric documentId.");
-      }
-
-      return {
-        ok: true,
-        voucherId,
-        documentId,
-        fileName: trimmedFileName,
-        warnings,
-        errors: [],
-      };
     },
   },
 
@@ -2200,9 +2504,8 @@ export const voucherTools = {
             accountDatev: { id: params.accountDatev.id, objectName: params.accountDatev.objectName },
           }),
           ...(params.taxRate !== undefined && { taxRate: params.taxRate }),
-          ...(params.sum !== undefined && { sum: String(params.sum) }),
           ...(params.net !== undefined && { net: params.net }),
-          ...(params.sumNet !== undefined && { sumNet: String(params.sumNet) }),
+          ...normalizeVoucherAmountFields(params.sum, params.sumNet),
           ...(params.sumGross !== undefined && { sumGross: String(params.sumGross) }),
           ...(params.comment !== undefined && { comment: params.comment }),
           ...(params.isAsset !== undefined && { isAsset: params.isAsset }),
@@ -2401,8 +2704,7 @@ export const voucherTools = {
         accountDatev: { id: pos.accountDatev.id, objectName: "AccountDatev" },
         taxRate: pos.taxRate,
         net: pos.net,
-        sum: String(pos.sum),
-        ...(pos.sumNet !== undefined && { sumNet: String(pos.sumNet) }),
+        ...normalizeVoucherAmountFields(pos.sum, pos.sumNet),
         ...(pos.sumGross !== undefined && { sumGross: String(pos.sumGross) }),
         ...(pos.comment && { comment: pos.comment }),
         ...(pos.isAsset !== undefined && { isAsset: pos.isAsset }),
@@ -2463,8 +2765,7 @@ export const voucherTools = {
           accountDatev: { id: params.accountDatev.id, objectName: "AccountDatev" },
           taxRate: params.taxRate,
           net: params.net,
-          sum: String(params.sum),
-          ...(params.sumNet !== undefined && { sumNet: String(params.sumNet) }),
+          ...normalizeVoucherAmountFields(params.sum, params.sumNet),
           ...(params.sumGross !== undefined && { sumGross: String(params.sumGross) }),
           ...(params.comment && { comment: params.comment }),
           ...(params.isAsset !== undefined && { isAsset: params.isAsset }),

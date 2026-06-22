@@ -6,7 +6,6 @@ export function createSevdeskClient(apiToken: string) {
     baseUrl: "https://my.sevdesk.de/api/v1",
     headers: {
       Authorization: apiToken,
-      "Content-Type": "application/json",
       Accept: "application/json",
     },
   });
