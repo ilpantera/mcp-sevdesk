@@ -1,11 +1,13 @@
 import { z } from "zod";
+import { createRequire } from "node:module";
 import { inflateRawSync, inflateSync } from "node:zlib";
-// Import from the lib sub-path to bypass the diagnostic test-data loading that
-// pdf-parse's main entry point performs (it reads `./test/data/05-versions-space.pdf`
-// which fails in sandboxed or read-only environments).  If the package restructures
-// its internals, switch back to `require('pdf-parse')` and accept the load-time I/O.
-// eslint-disable-next-line @typescript-eslint/no-require-imports
-const pdfParse = require("pdf-parse/lib/pdf-parse.js") as (
+// Use createRequire to load pdf-parse's internal entry point directly.
+// This bypasses the diagnostic test-data loading that pdf-parse's main entry
+// point performs (it reads `./test/data/05-versions-space.pdf` which fails in
+// sandboxed or read-only environments).  createRequire is the ESM-compatible
+// way to call require() – the plain require() form is not available in ES modules.
+const _require = createRequire(import.meta.url);
+const pdfParse = _require("pdf-parse/lib/pdf-parse.js") as (
   dataBuffer: Buffer,
   options?: { max?: number }
 ) => Promise<{ numpages: number; text: string }>;
