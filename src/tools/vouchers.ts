@@ -64,6 +64,7 @@ export type VoucherBookingPlanIssueCode =
   | "WRITE_PHASE_FAILED"
   | "EINVOICE_READ_FAILED"
   | "IMAGE_READ_FAILED"
+  | "DOCUMENT_INFO_READ_FAILED"
   | "STATUS_CHANGE_NOT_SUPPORTED";
 
 export type VoucherBookingPlanIssue = {
@@ -136,6 +137,14 @@ type VoucherReadResult<T> = {
   ok: boolean;
   data?: T;
   error?: VoucherBookingPlanIssue;
+};
+
+type VoucherDocumentInfo = {
+  documentId: number;
+  fileName: string | null;
+  mimeType: string | null;
+  hasPdf: boolean;
+  hasImagePreview: boolean;
 };
 
 type VoucherBatchResult<T> = {
@@ -637,6 +646,49 @@ async function checkAndExtractEInvoiceInternal(client: SevdeskClient, voucherId:
   }
 
   return extractEInvoiceData(Buffer.from(documentData));
+}
+
+async function getVoucherDocumentInfoInternal(
+  client: SevdeskClient,
+  voucherId: number
+): Promise<VoucherDocumentInfo | null> {
+  const voucherData = await getVoucherByIdInternal(client, voucherId);
+  const documentId = getVoucherDocumentId(voucherData as VoucherResponseData | undefined);
+  if (!documentId) {
+    return null;
+  }
+
+  try {
+    const imageData = await getVoucherDocumentImageInternal(client, voucherId);
+    const responseRecord = asRecord(imageData);
+    const objects = asRecord(responseRecord?.objects);
+
+    const fileName = getStringValue(objects?.filename) ?? null;
+    const originMimeType = getStringValue(objects?.originMimeType) ?? null;
+    const previewMimeType = getStringValue(objects?.mimeType);
+
+    const hasPdf =
+      originMimeType === "application/pdf" ||
+      (fileName !== null && fileName.toLowerCase().endsWith(".pdf"));
+    const hasImagePreview =
+      typeof previewMimeType === "string" && previewMimeType.startsWith("image/");
+
+    return {
+      documentId,
+      fileName,
+      mimeType: originMimeType,
+      hasPdf,
+      hasImagePreview,
+    };
+  } catch {
+    return {
+      documentId,
+      fileName: null,
+      mimeType: null,
+      hasPdf: false,
+      hasImagePreview: false,
+    };
+  }
 }
 
 async function getVoucherBookingContextInternal(
@@ -1830,6 +1882,59 @@ export const voucherTools = {
     }),
     handler: async (client: SevdeskClient, params: { voucherId: number }) =>
       getVoucherDocumentImageInternal(client, params.voucherId),
+  },
+
+  get_voucher_document_info: {
+    description:
+      "Read-only tool that returns document metadata for a single voucher. Returns documentId, fileName, mimeType (of the original document), hasPdf, and hasImagePreview. " +
+      "Useful for PDF-first review workflows where Claude reads the PDF directly while MCP handles sevDesk state and writeback. " +
+      "Returns null for the document field when no document is attached. " +
+      "fileName/mimeType are null and hasPdf/hasImagePreview are false when document metadata cannot be retrieved.",
+    inputSchema: z.object({
+      voucherId: z.number().int().positive().describe("The ID of the voucher"),
+    }),
+    handler: async (client: SevdeskClient, params: { voucherId: number }) => {
+      const document = await getVoucherDocumentInfoInternal(client, params.voucherId);
+      return { voucherId: params.voucherId, document };
+    },
+  },
+
+  get_voucher_document_info_batch: {
+    description:
+      "Read-only batch variant of get_voucher_document_info. Returns document metadata for up to 50 vouchers. " +
+      "Each result contains voucherId and the document field (documentId, fileName, mimeType, hasPdf, hasImagePreview). " +
+      "Useful for quickly mapping a list of draft vouchers to their PDF documents before starting a review workflow. " +
+      "Per-voucher errors are reported in the errors array; the top-level ok is false if any voucher hard-failed.",
+    inputSchema: z.object({
+      voucherIds: z.array(z.number().int().positive()).min(1).max(50),
+    }),
+    handler: async (client: SevdeskClient, params: { voucherIds: number[] }) => {
+      const results: Array<VoucherBatchResult<{ document: VoucherDocumentInfo | null }>> =
+        await Promise.all(
+          params.voucherIds.map(async (voucherId) => {
+            try {
+              const document = await getVoucherDocumentInfoInternal(client, voucherId);
+              return { voucherId, ok: true, data: { document }, errors: [], warnings: [] };
+            } catch (error) {
+              return {
+                voucherId,
+                ok: false,
+                errors: [
+                  createIssue(
+                    "DOCUMENT_INFO_READ_FAILED",
+                    `Voucher document info could not be loaded: ${getErrorMessage(error)}`
+                  ),
+                ],
+                warnings: [],
+              };
+            }
+          })
+        );
+      return {
+        ok: results.every((result) => result.ok),
+        results,
+      };
+    },
   },
 
   check_and_extract_einvoice: {
