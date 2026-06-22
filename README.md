@@ -128,6 +128,8 @@ Diese Bereiche bleiben bewusst **low-level**. Für Update 2.0 werden Statuswechs
 
 `extract_voucher_document_text` und `extract_voucher_facts` laden Belegdokumente **serverseitig** herunter und geben kompakten Text bzw. strukturierte Daten zurück – Claude arbeitet damit statt mit rohen PDF-/Base64-Payloads.
 
+Primär wird `/Document/{documentId}` verwendet. Falls dieser Download fehlschlägt, nutzt der MCP optional `GET /Export/voucherZip` als serverseitigen Fallback: ZIP-Content wird im MCP dekodiert/entpackt, deterministisch über den sevDesk-Dokumentnamen gemappt und dann normal extrahiert. Bei fehlender/mehrdeutiger Zuordnung wird **nicht geraten**, sondern eine explizite Warnung/Fehlermeldung erzeugt.
+
 ### Ablauf (empfohlene Reihenfolge)
 
 1. Entwurfs-Belege laden: `list_vouchers(status="50")`
@@ -186,6 +188,7 @@ Mögliche Werte für `source`:
 - **Durchsuchbare PDFs** (mit Textlayer, z. B. von modernen Scannern oder digitalen Rechnungen): vollständige Textextraktion.
 - **Bildbasierte PDFs** (gescannte Seiten ohne Textlayer): `source: "none"`, Warnung im `warnings`-Array. Für diese Fälle empfiehlt sich der direkte PDF-Review in Claude.
 - **JPEG/PNG-Dokumente**: ebenfalls `source: "none"` mit Warnung. Direkte Claude-Analyse bleibt die zuverlässigste Option für Bilddokumente.
+- **VoucherZip-Fallback**: dient nur als zusätzliche serverseitige Dokumentquelle für die Extraktion. ZIP/PDF-Rohdaten werden nicht als Primärworkflow an Claude durchgereicht.
 - Felder, die nicht zuverlässig bestimmt werden können, sind `null` mit erklärender Warnung.
 - Die Batch-Varianten erlauben bis zu **20 Belege** pro Aufruf.
 

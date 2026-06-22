@@ -2,7 +2,13 @@ import { describe, expect, it, vi } from "vitest";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { join, dirname } from "node:path";
-import { voucherTools, parseInvoiceDateString, extractFactsFromPlainText } from "../src/tools/vouchers.js";
+import {
+  voucherTools,
+  parseInvoiceDateString,
+  extractFactsFromPlainText,
+  decodeAndUnpackVoucherZipPayload,
+  pickVoucherZipEntryForDocument,
+} from "../src/tools/vouchers.js";
 import type { SevdeskClient } from "../src/client.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -34,6 +40,27 @@ function makePngBuffer(): Buffer {
 /** Convert a Buffer to the ArrayBuffer slice that the sevDesk client returns for document downloads. */
 function toArrayBuffer(buf: Buffer): ArrayBuffer {
   return buf.buffer.slice(buf.byteOffset, buf.byteOffset + buf.byteLength) as ArrayBuffer;
+}
+
+function makeStoredZip(entries: Array<{ fileName: string; bytes: Buffer }>): Buffer {
+  return Buffer.concat(
+    entries.map(({ fileName, bytes }) => {
+      const nameBytes = Buffer.from(fileName, "utf8");
+      const header = Buffer.alloc(30);
+      header.writeUInt32LE(0x04034b50, 0); // local file header signature
+      header.writeUInt16LE(20, 4); // version needed
+      header.writeUInt16LE(0, 6); // flags
+      header.writeUInt16LE(0, 8); // compression method (stored)
+      header.writeUInt16LE(0, 10); // mod time
+      header.writeUInt16LE(0, 12); // mod date
+      header.writeUInt32LE(0, 14); // crc32 (not validated by parser)
+      header.writeUInt32LE(bytes.length, 18); // compressed size
+      header.writeUInt32LE(bytes.length, 22); // uncompressed size
+      header.writeUInt16LE(nameBytes.length, 26); // file name length
+      header.writeUInt16LE(0, 28); // extra length
+      return Buffer.concat([header, nameBytes, bytes]);
+    })
+  );
 }
 
 function buildGetMock(documentId: number, documentBytes: Buffer) {
@@ -131,6 +158,51 @@ describe("extract_voucher_document_text", () => {
         { voucherId: 1 }
       )
     ).rejects.toThrow("no document attached");
+  });
+
+  it("falls back to Export/voucherZip when direct document download fails", async () => {
+    const pdfBytes = loadRealPdfWithText();
+    const zipBytes = makeStoredZip([{ fileName: "exports/a1b2c3d4e5.pdf", bytes: pdfBytes }]);
+    const GET = vi.fn().mockImplementation((path: string) => {
+      if (path === "/Voucher/{voucherId}") {
+        return Promise.resolve({
+          data: { objects: [{ id: 1, document: { id: 42, objectName: "Document" } }] },
+          error: undefined,
+        });
+      }
+      if (path === "/Document/{documentId}") {
+        return Promise.resolve({ data: undefined, error: { message: "forbidden" } });
+      }
+      if (path === "/Voucher/{voucherId}/getDocumentImage") {
+        return Promise.resolve({
+          data: { objects: { filename: "a1b2c3d4e5.pdf", originMimeType: "application/pdf", mimeType: "image/jpeg" } },
+          error: undefined,
+        });
+      }
+      if (path === "/Export/voucherZip") {
+        return Promise.resolve({
+          data: {
+            objects: {
+              filename: "Belege.zip",
+              mimetype: "application/zip",
+              base64Encoded: true,
+              content: zipBytes.toString("base64"),
+            },
+          },
+          error: undefined,
+        });
+      }
+      return Promise.resolve({ data: undefined, error: "unexpected call" });
+    });
+
+    const result = await voucherTools.extract_voucher_document_text.handler(
+      { GET } as unknown as SevdeskClient,
+      { voucherId: 1 }
+    );
+
+    expect(result.source).toBe("pdf-text");
+    expect(result.text.length).toBeGreaterThan(20);
+    expect(result.warnings.some((warning) => warning.includes("Export/voucherZip fallback"))).toBe(true);
   });
 });
 
@@ -378,5 +450,32 @@ describe("extract_voucher_facts_batch", () => {
     expect(result.ok).toBe(false);
     expect(result.results[0].ok).toBe(false);
     expect(result.results[0].errors[0].code).toBe("DOCUMENT_TEXT_EXTRACTION_FAILED");
+  });
+
+  describe("voucherZip helpers", () => {
+    it("decodes and unpacks base64 ZIP content", () => {
+      const zipBytes = makeStoredZip([
+        { fileName: "one.pdf", bytes: Buffer.from("%PDF-1.4\n%%EOF", "utf8") },
+        { fileName: "two.txt", bytes: Buffer.from("hello", "utf8") },
+      ]);
+
+      const result = decodeAndUnpackVoucherZipPayload({
+        objects: { content: zipBytes.toString("base64"), base64Encoded: true },
+      });
+
+      expect(result.entries.map((entry) => entry.fileName)).toEqual(["one.pdf", "two.txt"]);
+      expect(result.warnings).toHaveLength(0);
+    });
+
+    it("returns explicit warning when deterministic filename mapping is impossible", () => {
+      const entries = [
+        { fileName: "a/receipt.pdf", bytes: Buffer.from("1") },
+        { fileName: "b/receipt.pdf", bytes: Buffer.from("2") },
+      ];
+      const result = pickVoucherZipEntryForDocument(entries, 99, "receipt.pdf");
+
+      expect(result.entry).toBeNull();
+      expect(result.warnings[0]).toMatch(/Multiple ZIP entries matched basename/i);
+    });
   });
 });

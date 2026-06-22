@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { inflateSync } from "node:zlib";
+import { inflateRawSync, inflateSync } from "node:zlib";
 // Import from the lib sub-path to bypass the diagnostic test-data loading that
 // pdf-parse's main entry point performs (it reads `./test/data/05-versions-space.pdf`
 // which fails in sandboxed or read-only environments).  If the package restructures
@@ -156,6 +156,11 @@ type VoucherDocumentInfo = {
   mimeType: string | null;
   hasPdf: boolean;
   hasImagePreview: boolean;
+};
+
+type VoucherZipEntry = {
+  fileName: string;
+  bytes: Buffer;
 };
 
 type DocumentTextSource = "pdf-text" | "ocr" | "none";
@@ -743,31 +748,222 @@ async function getVoucherDocumentInfoInternal(
   }
 }
 
+export function decodeAndUnpackVoucherZipPayload(exportData: unknown): { entries: VoucherZipEntry[]; warnings: string[] } {
+  const responseRecord = asRecord(exportData);
+  const objectsRecord = asRecord(responseRecord?.objects);
+  const content = getStringValue(objectsRecord?.content);
+  const warnings: string[] = [];
+
+  if (!content || content.trim().length === 0) {
+    throw new Error("Export/voucherZip did not return a base64 content payload");
+  }
+
+  let zipBytes: Buffer;
+  try {
+    zipBytes = Buffer.from(content, "base64");
+  } catch {
+    throw new Error("Export/voucherZip content is not valid base64");
+  }
+
+  if (zipBytes.length === 0) {
+    throw new Error("Export/voucherZip returned an empty ZIP payload");
+  }
+
+  const entries: VoucherZipEntry[] = [];
+  let offset = 0;
+  while (offset + 4 <= zipBytes.length) {
+    const signature = zipBytes.readUInt32LE(offset);
+    if (signature === 0x02014b50 || signature === 0x06054b50) {
+      break;
+    }
+    if (signature !== 0x04034b50) {
+      warnings.push(`Unexpected ZIP signature 0x${signature.toString(16)} at offset ${offset}; stopping parse.`);
+      break;
+    }
+    if (offset + 30 > zipBytes.length) {
+      warnings.push("Truncated ZIP local file header encountered.");
+      break;
+    }
+
+    const generalPurposeFlag = zipBytes.readUInt16LE(offset + 6);
+    const compressionMethod = zipBytes.readUInt16LE(offset + 8);
+    const compressedSize = zipBytes.readUInt32LE(offset + 18);
+    const fileNameLength = zipBytes.readUInt16LE(offset + 26);
+    const extraLength = zipBytes.readUInt16LE(offset + 28);
+
+    if ((generalPurposeFlag & 0x08) !== 0) {
+      warnings.push("ZIP entry uses data descriptor; entry skipped because deterministic parsing is not possible.");
+      break;
+    }
+
+    const fileNameStart = offset + 30;
+    const fileNameEnd = fileNameStart + fileNameLength;
+    const dataStart = fileNameEnd + extraLength;
+    const dataEnd = dataStart + compressedSize;
+    if (dataEnd > zipBytes.length) {
+      warnings.push("Truncated ZIP entry payload encountered.");
+      break;
+    }
+
+    const fileName = zipBytes.toString("utf8", fileNameStart, fileNameEnd);
+    const compressedData = zipBytes.subarray(dataStart, dataEnd);
+    let entryBytes: Buffer | null = null;
+
+    if (compressionMethod === 0) {
+      entryBytes = Buffer.from(compressedData);
+    } else if (compressionMethod === 8) {
+      try {
+        entryBytes = inflateRawSync(compressedData);
+      } catch (error) {
+        warnings.push(
+          `Failed to inflate ZIP entry "${fileName}": ${getErrorMessage(error)}`
+        );
+      }
+    } else {
+      warnings.push(`Unsupported ZIP compression method (${compressionMethod}) for entry "${fileName}".`);
+    }
+
+    if (entryBytes && fileName.length > 0 && !fileName.endsWith("/")) {
+      entries.push({ fileName, bytes: entryBytes });
+    }
+
+    offset = dataEnd;
+  }
+
+  if (entries.length === 0) {
+    throw new Error("No usable files found in Export/voucherZip payload");
+  }
+
+  return { entries, warnings };
+}
+
+export function pickVoucherZipEntryForDocument(
+  entries: VoucherZipEntry[],
+  documentId: number,
+  documentFileName: string | null
+): { entry: VoucherZipEntry | null; warnings: string[] } {
+  const warnings: string[] = [];
+  const fileName = documentFileName?.trim() ?? "";
+  const lowerFileName = fileName.toLowerCase();
+
+  if (lowerFileName.length > 0) {
+    const exactPathMatches = entries.filter((entry) => entry.fileName.toLowerCase() === lowerFileName);
+    if (exactPathMatches.length === 1) {
+      return { entry: exactPathMatches[0], warnings };
+    }
+    if (exactPathMatches.length > 1) {
+      return {
+        entry: null,
+        warnings: [`Multiple ZIP entries matched exact filename "${fileName}".`],
+      };
+    }
+
+    const basenameMatches = entries.filter((entry) => {
+      const baseName = entry.fileName.split("/").pop()?.toLowerCase();
+      return baseName === lowerFileName;
+    });
+    if (basenameMatches.length === 1) {
+      return { entry: basenameMatches[0], warnings };
+    }
+    if (basenameMatches.length > 1) {
+      return {
+        entry: null,
+        warnings: [`Multiple ZIP entries matched basename "${fileName}".`],
+      };
+    }
+  }
+
+  const idTokenMatches = entries.filter((entry) => {
+    const baseName = entry.fileName.split("/").pop()?.toLowerCase() ?? "";
+    return new RegExp(`(?:^|[^0-9])${documentId}(?:[^0-9]|$)`).test(baseName);
+  });
+  if (idTokenMatches.length === 1) {
+    warnings.push("Matched ZIP entry by documentId token because exact filename was unavailable.");
+    return { entry: idTokenMatches[0], warnings };
+  }
+  if (idTokenMatches.length > 1) {
+    warnings.push(`Multiple ZIP entries matched documentId token "${documentId}".`);
+  } else if (fileName.length > 0) {
+    warnings.push(`No ZIP entry matched voucher document filename "${fileName}".`);
+  } else {
+    warnings.push("Voucher document filename is unavailable; ZIP entry cannot be matched deterministically.");
+  }
+
+  return { entry: null, warnings };
+}
+
+async function downloadDocumentBytesViaVoucherZipInternal(
+  client: SevdeskClient,
+  voucherId: number,
+  documentId: number
+): Promise<{ bytes: Buffer; warnings: string[] }> {
+  const documentInfo = await getVoucherDocumentInfoInternal(client, voucherId);
+  const { data: exportData, error: exportError } = await callUntypedClientMethod(client, "GET", "/Export/voucherZip", {
+    params: {
+      query: {
+        download: false,
+        sevQuery: {
+          modelName: "Voucher",
+          objectName: "SevQuery",
+          limit: 1,
+          filter: { id: voucherId } as Record<string, unknown>,
+        },
+      },
+    },
+  });
+  if (exportError) {
+    throw new Error(`Export/voucherZip request failed: ${JSON.stringify(exportError)}`);
+  }
+
+  const { entries, warnings } = decodeAndUnpackVoucherZipPayload(exportData);
+  const picked = pickVoucherZipEntryForDocument(entries, documentId, documentInfo?.fileName ?? null);
+  const combinedWarnings = [...warnings, ...picked.warnings];
+  if (!picked.entry) {
+    throw new Error(combinedWarnings.join(" "));
+  }
+
+  return {
+    bytes: picked.entry.bytes,
+    warnings: [...combinedWarnings, `Document loaded via Export/voucherZip fallback from "${picked.entry.fileName}".`],
+  };
+}
+
 async function downloadDocumentBytesInternal(
   client: SevdeskClient,
   voucherId: number
-): Promise<{ documentId: number; bytes: Buffer }> {
+): Promise<{ documentId: number; bytes: Buffer; warnings: string[] }> {
   const voucherData = await getVoucherByIdInternal(client, voucherId);
   const documentId = getVoucherDocumentId(voucherData as VoucherResponseData | undefined);
   if (!documentId) {
     throw new Error("Voucher has no document attached");
   }
 
-  const { data: documentData, error: documentError } = await callUntypedClientMethod(
-    client,
-    "GET",
-    "/Document/{documentId}",
-    {
-      params: { path: { documentId } },
-      parseAs: "arrayBuffer",
+  try {
+    const { data: documentData, error: documentError } = await callUntypedClientMethod(
+      client,
+      "GET",
+      "/Document/{documentId}",
+      {
+        params: { path: { documentId } },
+        parseAs: "arrayBuffer",
+      }
+    );
+    if (documentError) throw new Error(JSON.stringify(documentError));
+    if (!(documentData instanceof ArrayBuffer)) {
+      throw new Error("Document download did not return raw bytes");
     }
-  );
-  if (documentError) throw new Error(JSON.stringify(documentError));
-  if (!(documentData instanceof ArrayBuffer)) {
-    throw new Error("Document download did not return raw bytes");
+    return { documentId, bytes: Buffer.from(documentData), warnings: [] };
+  } catch (directDownloadError) {
+    const fallbackResult = await downloadDocumentBytesViaVoucherZipInternal(client, voucherId, documentId);
+    return {
+      documentId,
+      bytes: fallbackResult.bytes,
+      warnings: [
+        `Direct /Document download failed: ${getErrorMessage(directDownloadError)}`,
+        ...fallbackResult.warnings,
+      ],
+    };
   }
-
-  return { documentId, bytes: Buffer.from(documentData) };
 }
 
 function detectDocumentType(bytes: Buffer): "pdf" | "image" | "unknown" {
@@ -812,7 +1008,7 @@ async function extractDocumentTextInternal(
   client: SevdeskClient,
   voucherId: number
 ): Promise<DocumentTextResult> {
-  const { documentId, bytes } = await downloadDocumentBytesInternal(client, voucherId);
+  const { documentId, bytes, warnings: downloadWarnings } = await downloadDocumentBytesInternal(client, voucherId);
   const docType = detectDocumentType(bytes);
 
   if (docType === "pdf") {
@@ -823,7 +1019,7 @@ async function extractDocumentTextInternal(
       source: text.length >= MIN_MEANINGFUL_TEXT_LENGTH ? "pdf-text" : "none",
       pages,
       text,
-      warnings,
+      warnings: [...downloadWarnings, ...warnings],
     };
   }
 
@@ -835,6 +1031,7 @@ async function extractDocumentTextInternal(
       pages: 1,
       text: "",
       warnings: [
+        ...downloadWarnings,
         "Document is an image file. OCR is not performed server-side. " +
           "Use direct document review in Claude for image-based vouchers.",
       ],
@@ -847,7 +1044,7 @@ async function extractDocumentTextInternal(
     source: "none",
     pages: null,
     text: "",
-    warnings: ["Unknown document type; text extraction not supported for this format."],
+    warnings: [...downloadWarnings, "Unknown document type; text extraction not supported for this format."],
   };
 }
 
@@ -1095,8 +1292,8 @@ async function extractVoucherFactsInternal(
   client: SevdeskClient,
   voucherId: number
 ): Promise<VoucherFactsResult> {
-  const { documentId, bytes } = await downloadDocumentBytesInternal(client, voucherId);
-  const warnings: string[] = [];
+  const { documentId, bytes, warnings: downloadWarnings } = await downloadDocumentBytesInternal(client, voucherId);
+  const warnings: string[] = [...downloadWarnings];
 
   // 1. Try e-invoice extraction first
   let einvoiceResult: EInvoiceCheckResult | null = null;
@@ -2608,6 +2805,7 @@ export const voucherTools = {
   extract_voucher_document_text: {
     description:
       "Read-only tool that downloads a voucher document server-side and returns the extracted text. " +
+      "Primary source is /Document/{documentId}; if that fails, Export/voucherZip is used as a server-side fallback. " +
       "For PDFs with a text layer (e.g. searchable scanner PDFs or digital invoices), text is extracted directly. " +
       "For image-only PDFs or JPEG/PNG documents, a warning is returned and text will be empty. " +
       "Use this tool so Claude can work from compact extracted text instead of raw image/base64 payloads.",
@@ -2656,6 +2854,7 @@ export const voucherTools = {
   extract_voucher_facts: {
     description:
       "Read-only tool that extracts structured voucher facts from the attached document. " +
+      "Primary source is /Document/{documentId}; if that fails, Export/voucherZip is used as a server-side fallback. " +
       "Prefers ZUGFeRD/XRechnung e-invoice data when available (source: 'einvoice' or 'mixed'). " +
       "Falls back to PDF text extraction with heuristic parsing (source: 'pdf-text'). " +
       "Returns null for fields that cannot be determined reliably, with explanatory warnings. " +
