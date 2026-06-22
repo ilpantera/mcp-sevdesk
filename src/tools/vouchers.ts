@@ -941,10 +941,11 @@ function extractFactsFromZUGFeRD(xml: string): Partial<VoucherFactsResult> {
 function extractFactsFromXRechnung(xml: string): Partial<VoucherFactsResult> {
   const warnings: string[] = [];
 
-  // UBL format: first <cbc:ID> is invoice ID
-  const idMatches = xml.match(/<(?:[\w]*:)?ID[^>]*>([^<]+)<\/(?:[\w]*:)?ID>/gi) ?? [];
-  const firstIdRaw = idMatches[0];
-  const invoiceNumber = firstIdRaw ? (firstIdRaw.replace(/<[^>]+>/g, "").trim() || null) : null;
+  // UBL format: first <cbc:ID> is invoice ID – use matchAll to capture group directly
+  const idMatches = Array.from(
+    xml.matchAll(/<(?:[\w]*:)?ID[^>]*>([^<]+)<\/(?:[\w]*:)?ID>/gi)
+  );
+  const invoiceNumber = idMatches[0]?.[1]?.trim() || null;
 
   const rawDate = extractFirstXmlTagContent(xml, "IssueDate");
   const invoiceDate = parseInvoiceDateString(rawDate);

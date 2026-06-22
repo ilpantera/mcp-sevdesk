@@ -8,11 +8,11 @@ import type { SevdeskClient } from "../src/client.js";
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
 /**
- * A real multi-page PDF with a text layer (from the pdf-parse test suite).
+ * A real multi-page PDF with a text layer (committed as a test fixture).
  * pdf-parse can extract meaningful text from this file.
  */
 function loadRealPdfWithText(): Buffer {
-  return readFileSync(join(__dirname, "../node_modules/pdf-parse/test/data/04-valid.pdf"));
+  return readFileSync(join(__dirname, "fixtures/sample-text.pdf"));
 }
 
 /** PDF with no text (simulates a scanned image PDF) */
