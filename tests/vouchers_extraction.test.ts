@@ -230,8 +230,9 @@ describe("extract_voucher_document_text", () => {
 
     expect(result.source).toBe("ocr");
     expect(result.text).toBe(ocrText);
-    // pdf-parse fails on this synthetic PDF, so the PDF-related warning (either parse failure
-    // or "no text layer") should still be present alongside the successful OCR result
+    // makePdfWithEmbeddedJpeg() has a minimal PDF structure (no xref table, no trailer) that
+    // causes pdf-parse to throw "Invalid PDF structure". The resulting parse-failure warning
+    // is propagated alongside the successful OCR result.
     expect(result.warnings.some((w) => /pdf|text layer|extraction failed/i.test(w))).toBe(true);
   });
 

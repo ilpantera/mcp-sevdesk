@@ -1100,7 +1100,8 @@ function extractFirstJpegFromPdf(pdfBytes: Buffer): Buffer | null {
 
   // Search for EOI (FF D9) scanning backwards from end for the outermost JPEG.
   // The minimum viable JPEG is SOI (2 bytes) + at least one 2-byte segment + EOI (2 bytes) = 6 bytes,
-  // so EOI can appear earliest at index soiIndex+4 (candidate[4..5] = FF D9 → 6-byte slice).
+  // so the earliest absolute position for the EOI pair is soiIndex+4 (pdfBytes[soiIndex+4..+5] = FF D9),
+  // which would yield a 6-byte candidate slice (candidate[4..5] = FF D9).
   for (let i = pdfBytes.length - 2; i >= soiIndex + 4; i--) {
     if (pdfBytes[i] === 0xff && pdfBytes[i + 1] === 0xd9) {
       const candidate = pdfBytes.subarray(soiIndex, i + 2);
