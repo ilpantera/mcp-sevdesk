@@ -272,7 +272,9 @@ describe("get_voucher_original_pdf", () => {
     // Both errors are surfaced: voucherZip cause and the final fallback failure
     expect(result.errors).toHaveLength(2);
     expect(result.errors[0].code).toBe("ZIP_MATCH_NOT_PDF");
+    expect(result.errors[0].message).toMatch(/not a valid PDF.*%PDF/i);
     expect(result.errors[1].code).toBe("FALLBACK_NOT_PDF");
+    expect(result.errors[1].message).toMatch(/not a valid PDF.*image/i);
   });
 
   it("returns ZIP_NO_CONTENT + FALLBACK_NOT_PDF when voucherZip returns empty content and fallback is also not a PDF", async () => {
@@ -308,7 +310,9 @@ describe("get_voucher_original_pdf", () => {
     // Both errors are surfaced: voucherZip cause and the final fallback failure
     expect(result.errors).toHaveLength(2);
     expect(result.errors[0].code).toBe("ZIP_NO_CONTENT");
+    expect(result.errors[0].message).toMatch(/did not return a base64 content payload/i);
     expect(result.errors[1].code).toBe("FALLBACK_NOT_PDF");
+    expect(result.errors[1].message).toMatch(/not a valid PDF.*image/i);
   });
 });
 

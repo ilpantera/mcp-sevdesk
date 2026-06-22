@@ -749,6 +749,11 @@ function buildPdfRetrievalErrors(error: unknown): VoucherBookingPlanIssue[] {
   return errors;
 }
 
+/** Returns the common "Export/voucherZip primary retrieval failed: ..." prefix for fallback error messages. */
+function zipPrimaryFailedPrefix(voucherZipError: unknown): string {
+  return `Export/voucherZip primary retrieval failed: ${getErrorMessage(voucherZipError)}`;
+}
+
 export function decodeAndUnpackVoucherZipPayload(exportData: unknown): { entries: VoucherZipEntry[]; warnings: string[] } {
   const responseRecord = asRecord(exportData);
   const objectsRecord = asRecord(responseRecord?.objects);
@@ -1032,8 +1037,7 @@ async function downloadVoucherOriginalPdfInternal(
     if (documentError) {
       throw new VoucherPdfRetrievalError(
         "FALLBACK_FAILED",
-        `Export/voucherZip primary retrieval failed: ${getErrorMessage(voucherZipError)}; ` +
-          `fallback /Document/{documentId} request also failed: ${JSON.stringify(documentError)}`,
+        `${zipPrimaryFailedPrefix(voucherZipError)}; fallback /Document/{documentId} request also failed: ${JSON.stringify(documentError)}`,
         zipCause
       );
     }
@@ -1048,8 +1052,7 @@ async function downloadVoucherOriginalPdfInternal(
     if (!isPdfBuffer(bytes)) {
       throw new VoucherPdfRetrievalError(
         "FALLBACK_NOT_PDF",
-        `Export/voucherZip primary retrieval failed: ${getErrorMessage(voucherZipError)}; ` +
-          "fallback /Document/{documentId} download succeeded but content is not a valid PDF (missing %PDF header) — document is likely an image",
+        `${zipPrimaryFailedPrefix(voucherZipError)}; fallback /Document/{documentId} download succeeded but content is not a valid PDF (missing %PDF header) — document is likely an image`,
         zipCause
       );
     }
@@ -1064,7 +1067,7 @@ async function downloadVoucherOriginalPdfInternal(
       contentBase64: bytes.toString("base64"),
       sizeBytes: bytes.length,
       warnings: [
-        `Export/voucherZip primary retrieval failed: ${getErrorMessage(voucherZipError)}`,
+        zipPrimaryFailedPrefix(voucherZipError),
         "Original PDF returned from fallback /Document/{documentId} download.",
       ],
     };
