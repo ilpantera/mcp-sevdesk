@@ -148,8 +148,8 @@ describe("get_voucher_original_pdf", () => {
     expect(result.data?.warnings[0]).toMatch(/Export\/voucherZip primary retrieval failed/i);
   });
 
-  it("returns FALLBACK_NOT_PDF when fallback download is an image, not a PDF", async () => {
-    // Real-world case: hasPdf=false, document is image, voucherZip also fails
+  it("returns ZIP_NO_MATCH + FALLBACK_NOT_PDF when voucherZip has no matching entry and fallback is an image", async () => {
+    // Real-world case: hasPdf=false, document is image, voucherZip ZIP entry doesn't match
     const zipBytes = makeZipWithStoreCompression([{ fileName: "exports/a1b2c3d4e5.pdf", bytes: Buffer.from("not-pdf") }]);
     const GET = vi.fn().mockImplementation((path: string) => {
       if (path === "/Voucher/{voucherId}") {
@@ -179,8 +179,11 @@ describe("get_voucher_original_pdf", () => {
     );
 
     expect(result.ok).toBe(false);
-    expect(result.errors[0].code).toBe("FALLBACK_NOT_PDF");
-    expect(result.errors[0].message).toMatch(/not a valid PDF.*image/i);
+    // Both errors surfaced: voucherZip cause (ZIP_NO_MATCH) and fallback failure (FALLBACK_NOT_PDF)
+    expect(result.errors).toHaveLength(2);
+    expect(result.errors[0].code).toBe("ZIP_NO_MATCH");
+    expect(result.errors[1].code).toBe("FALLBACK_NOT_PDF");
+    expect(result.errors[1].message).toMatch(/not a valid PDF.*image/i);
   });
 
   it("returns FALLBACK_FAILED when fallback request itself fails", async () => {
@@ -236,7 +239,7 @@ describe("get_voucher_original_pdf", () => {
     expect(result.errors[0].code).toBe("VOUCHER_NO_DOCUMENT");
   });
 
-  it("returns ZIP_MATCH_NOT_PDF when ZIP entry is found but content is not a valid PDF", async () => {
+  it("returns ZIP_MATCH_NOT_PDF + FALLBACK_NOT_PDF when ZIP entry is found but not a PDF and fallback is also not a PDF", async () => {
     const zipBytes = makeZipWithStoreCompression([{ fileName: "exports/a1b2c3d4e5.pdf", bytes: Buffer.from("not-a-pdf") }]);
     const GET = vi.fn().mockImplementation((path: string) => {
       if (path === "/Voucher/{voucherId}") {
@@ -255,7 +258,6 @@ describe("get_voucher_original_pdf", () => {
         return Promise.resolve({ data: { objects: { content: zipBytes.toString("base64"), base64Encoded: true } }, error: undefined });
       }
       if (path === "/Document/{documentId}") {
-        // fallback also fails so we can see the specific ZIP_MATCH_NOT_PDF code propagate
         return Promise.resolve({ data: toArrayBuffer(Buffer.from("still-not-pdf")), error: undefined });
       }
       return Promise.resolve({ data: undefined, error: "unexpected call" });
@@ -267,11 +269,13 @@ describe("get_voucher_original_pdf", () => {
     );
 
     expect(result.ok).toBe(false);
-    // ZIP_MATCH_NOT_PDF triggers fallback; fallback is not PDF → FALLBACK_NOT_PDF
-    expect(["ZIP_MATCH_NOT_PDF", "FALLBACK_NOT_PDF"]).toContain(result.errors[0].code);
+    // Both errors are surfaced: voucherZip cause and the final fallback failure
+    expect(result.errors).toHaveLength(2);
+    expect(result.errors[0].code).toBe("ZIP_MATCH_NOT_PDF");
+    expect(result.errors[1].code).toBe("FALLBACK_NOT_PDF");
   });
 
-  it("returns ZIP_NO_CONTENT when voucherZip returns empty content payload", async () => {
+  it("returns ZIP_NO_CONTENT + FALLBACK_NOT_PDF when voucherZip returns empty content and fallback is also not a PDF", async () => {
     const GET = vi.fn().mockImplementation((path: string) => {
       if (path === "/Voucher/{voucherId}") {
         return Promise.resolve({
@@ -301,8 +305,10 @@ describe("get_voucher_original_pdf", () => {
     );
 
     expect(result.ok).toBe(false);
-    // ZIP_NO_CONTENT triggers fallback; fallback is not PDF → FALLBACK_NOT_PDF
-    expect(["ZIP_NO_CONTENT", "FALLBACK_NOT_PDF"]).toContain(result.errors[0].code);
+    // Both errors are surfaced: voucherZip cause and the final fallback failure
+    expect(result.errors).toHaveLength(2);
+    expect(result.errors[0].code).toBe("ZIP_NO_CONTENT");
+    expect(result.errors[1].code).toBe("FALLBACK_NOT_PDF");
   });
 });
 
@@ -384,7 +390,10 @@ describe("get_voucher_original_pdf_batch", () => {
     expect(result.ok).toBe(false);
     const entry = result.results[0];
     expect(entry.ok).toBe(false);
-    expect(entry.errors[0].code).toBe("FALLBACK_NOT_PDF");
-    expect(entry.errors[0].message).toMatch(/not a valid PDF.*image/i);
+    // Both errors are surfaced: voucherZip cause (ZIP_NO_MATCH) and fallback failure (FALLBACK_NOT_PDF)
+    expect(entry.errors).toHaveLength(2);
+    expect(entry.errors[0].code).toBe("ZIP_NO_MATCH");
+    expect(entry.errors[1].code).toBe("FALLBACK_NOT_PDF");
+    expect(entry.errors[1].message).toMatch(/not a valid PDF.*image/i);
   });
 });

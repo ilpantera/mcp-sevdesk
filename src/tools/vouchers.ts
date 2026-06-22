@@ -85,11 +85,14 @@ export type VoucherBookingPlanIssue = {
 /**
  * Typed error thrown by PDF retrieval internals so that specific failure codes
  * can be surfaced to callers instead of a generic DOCUMENT_DOWNLOAD_FAILED.
+ * `zipCause` carries the voucherZip-phase error when a fallback failure occurs,
+ * allowing handlers to surface both the voucherZip and fallback codes.
  */
 class VoucherPdfRetrievalError extends Error {
   constructor(
     public readonly code: VoucherBookingPlanIssueCode,
-    message: string
+    message: string,
+    public readonly zipCause?: VoucherPdfRetrievalError
   ) {
     super(message);
     this.name = "VoucherPdfRetrievalError";
@@ -729,6 +732,23 @@ async function getVoucherDocumentInfoInternal(
   }
 }
 
+/**
+ * Builds the structured errors array from a thrown PDF retrieval error.
+ * When a fallback error carries a `zipCause`, both the voucherZip failure code
+ * and the fallback failure code are included so callers can distinguish them.
+ */
+function buildPdfRetrievalErrors(error: unknown): VoucherBookingPlanIssue[] {
+  if (!(error instanceof VoucherPdfRetrievalError)) {
+    return [createIssue("DOCUMENT_DOWNLOAD_FAILED", getErrorMessage(error))];
+  }
+  const errors: VoucherBookingPlanIssue[] = [];
+  if (error.zipCause) {
+    errors.push(createIssue(error.zipCause.code, error.zipCause.message));
+  }
+  errors.push(createIssue(error.code, error.message));
+  return errors;
+}
+
 export function decodeAndUnpackVoucherZipPayload(exportData: unknown): { entries: VoucherZipEntry[]; warnings: string[] } {
   const responseRecord = asRecord(exportData);
   const objectsRecord = asRecord(responseRecord?.objects);
@@ -997,6 +1017,9 @@ async function downloadVoucherOriginalPdfInternal(
       warnings: voucherZipResult.warnings,
     };
   } catch (voucherZipError) {
+    // Preserve the typed voucherZip error so handlers can surface its code alongside the fallback code.
+    const zipCause = voucherZipError instanceof VoucherPdfRetrievalError ? voucherZipError : undefined;
+
     const { data: documentData, error: documentError } = await callUntypedClientMethod(
       client,
       "GET",
@@ -1010,13 +1033,15 @@ async function downloadVoucherOriginalPdfInternal(
       throw new VoucherPdfRetrievalError(
         "FALLBACK_FAILED",
         `Export/voucherZip primary retrieval failed: ${getErrorMessage(voucherZipError)}; ` +
-          `fallback /Document/{documentId} request also failed: ${JSON.stringify(documentError)}`
+          `fallback /Document/{documentId} request also failed: ${JSON.stringify(documentError)}`,
+        zipCause
       );
     }
     if (!(documentData instanceof ArrayBuffer)) {
       throw new VoucherPdfRetrievalError(
         "FALLBACK_FAILED",
-        "Fallback /Document download did not return raw bytes"
+        "Fallback /Document download did not return raw bytes",
+        zipCause
       );
     }
     const bytes = Buffer.from(documentData);
@@ -1024,7 +1049,8 @@ async function downloadVoucherOriginalPdfInternal(
       throw new VoucherPdfRetrievalError(
         "FALLBACK_NOT_PDF",
         `Export/voucherZip primary retrieval failed: ${getErrorMessage(voucherZipError)}; ` +
-          "fallback /Document/{documentId} download succeeded but content is not a valid PDF (missing %PDF header) — document is likely an image"
+          "fallback /Document/{documentId} download succeeded but content is not a valid PDF (missing %PDF header) — document is likely an image",
+        zipCause
       );
     }
 
@@ -2309,12 +2335,11 @@ export const voucherTools = {
         const data = await downloadVoucherOriginalPdfInternal(client, params.voucherId);
         return { ok: true as const, voucherId: params.voucherId, data, errors: [], warnings: [] };
       } catch (error) {
-        const code = error instanceof VoucherPdfRetrievalError ? error.code : "DOCUMENT_DOWNLOAD_FAILED";
         return {
           ok: false as const,
           voucherId: params.voucherId,
           data: null,
-          errors: [createIssue(code, getErrorMessage(error))],
+          errors: buildPdfRetrievalErrors(error),
           warnings: [],
         };
       }
@@ -2335,11 +2360,10 @@ export const voucherTools = {
             const data = await downloadVoucherOriginalPdfInternal(client, voucherId);
             return { voucherId, ok: true, data, errors: [], warnings: [] };
           } catch (error) {
-            const code = error instanceof VoucherPdfRetrievalError ? error.code : "DOCUMENT_DOWNLOAD_FAILED";
             return {
               voucherId,
               ok: false,
-              errors: [createIssue(code, getErrorMessage(error))],
+              errors: buildPdfRetrievalErrors(error),
               warnings: [],
             };
           }
