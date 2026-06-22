@@ -330,7 +330,7 @@ describe("get_voucher_original_pdf_batch", () => {
             error: undefined,
           });
         }
-        // voucher 2 has no document — should produce VOUCHER_NO_DOCUMENT
+        // voucher 2 has no document - should produce VOUCHER_NO_DOCUMENT
         return Promise.resolve({ data: { objects: [{ id: 2 }] }, error: undefined });
       }
       if (path === "/Voucher/{voucherId}/getDocumentImage") {

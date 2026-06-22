@@ -195,7 +195,7 @@ Bei Fehler (`ok: false`):
 | `ZIP_NO_CONTENT` | voucherZip-Response enthielt keinen verwertbaren Base64-Inhalt (z. B. `content: null`) |
 | `ZIP_NO_MATCH` | ZIP entpackt, aber kein Eintrag trifft das Dokument deterministisch |
 | `ZIP_AMBIGUOUS_MATCH` | Mehrere ZIP-Einträge passen — keine automatische Auswahl (kein Raten) |
-| `ZIP_MATCH_NOT_PDF` | ZIP-Eintrag gefunden, aber kein gültiger PDF-Header (`%PDF`) |
+| `ZIP_MATCH_NOT_PDF` | ZIP-Eintrag gefunden, aber kein gültiges PDF-Format |
 | `FALLBACK_NOT_PDF` | voucherZip fehlgeschlagen; Fallback-Download erfolgreich, aber Inhalt ist kein PDF (z. B. Bild) |
 | `FALLBACK_FAILED` | voucherZip fehlgeschlagen; Fallback-Request ebenfalls fehlgeschlagen |
 
