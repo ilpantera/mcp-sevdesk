@@ -153,8 +153,8 @@ describe("get_voucher_document_info", () => {
 
 describe("get_voucher_document_info_batch", () => {
   it("returns metadata for each voucher in the batch", async () => {
-    const GET = vi.fn().mockImplementation((path: string, init: { params: { path: { voucherId: number } } }) => {
-      const voucherId = init?.params?.path?.voucherId;
+    const GET = vi.fn().mockImplementation((path: string, options: { params: { path: { voucherId: number } } }) => {
+      const voucherId = options?.params?.path?.voucherId;
       if (path === "/Voucher/{voucherId}") {
         if (voucherId === 10) {
           return Promise.resolve({
