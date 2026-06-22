@@ -71,6 +71,8 @@ SEVDESK_API_TOKEN="dein-token" npm start
 | `check_and_extract_einvoice_batch` | read | Batch-Prüfung für ZUGFeRD/XRechnung |
 | `get_voucher_booking_context` | read | Voucher-Header, Positionen, E-Invoice und optional Bild in einem Aufruf |
 | `get_voucher_booking_context_batch` | read | Strukturierte Batch-Variante des Booking Context |
+| `get_voucher_document_info` | read | Dokument-Metadaten eines Belegs (documentId, Dateiname, MIME-Typ, hasPdf, hasImagePreview) |
+| `get_voucher_document_info_batch` | read | Batch-Variante von `get_voucher_document_info` für bis zu 50 Belege |
 | `validate_voucher_booking_plan` | read | Strikte lokale Validierung eines Voucher-Buchungsplans, optional mit Receipt Guidance |
 | `apply_voucher_booking_plan` | write | Empfohlenes High-Level-Tool für konsistente Voucher-Buchung |
 | `get_receipt_guidance` | read | Erlaubte Konto-/TaxRule-/TaxRate-Kombinationen aus sevDesk |
@@ -117,6 +119,45 @@ Diese Bereiche bleiben bewusst **low-level**. Für Update 2.0 werden Statuswechs
 
 - Tags
 - Reports
+
+## PDF-first Review Workflow
+
+`get_voucher_document_info` und `get_voucher_document_info_batch` ermöglichen einen **PDF-first Review Workflow**, bei dem Claude das Originaldokument direkt liest, während der MCP den sevDesk-Zustand verwaltet und Schreiboperationen ausführt.
+
+### Ablauf
+
+1. Entwurfs-Belege laden: `list_vouchers(status="50")`
+2. Dokument-Metadaten abrufen: `get_voucher_document_info_batch(voucherIds)`
+3. Für Belege mit `hasPdf: true`: PDF direkt von Claude analysieren (über `voucherId` oder `documentId` referenziert)
+4. Buchungsplan erstellen und validieren: `validate_voucher_booking_plan`
+5. Plan schreiben: `apply_voucher_booking_plan`
+
+### Rückgabeformat
+
+```json
+{
+  "voucherId": 147848515,
+  "document": {
+    "documentId": 123456,
+    "fileName": "a1b2c3d4.pdf",
+    "mimeType": "application/pdf",
+    "hasPdf": true,
+    "hasImagePreview": true
+  }
+}
+```
+
+Felder:
+
+| Feld | Typ | Beschreibung |
+|---|---|---|
+| `documentId` | `number` | Interne sevDesk-Dokument-ID |
+| `fileName` | `string \| null` | Interner Hash-Dateiname aus sevDesk (z. B. `a1b2c3d4.pdf`) |
+| `mimeType` | `string \| null` | MIME-Typ des Original-Dokuments (z. B. `application/pdf`) |
+| `hasPdf` | `boolean` | `true` wenn das Originaldokument ein PDF ist |
+| `hasImagePreview` | `boolean` | `true` wenn sevDesk eine Bildvorschau bereitstellt |
+
+Wenn kein Dokument angehängt ist, wird `document: null` zurückgegeben. Wenn das Dokument vorhanden ist, aber Metadaten nicht abrufbar sind, werden `fileName` und `mimeType` als `null` und `hasPdf`/`hasImagePreview` als `false` zurückgegeben.
 
 ## Voucher-Booking-Plan (empfohlener Workflow)
 
