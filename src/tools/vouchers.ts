@@ -1263,13 +1263,15 @@ async function uploadVoucherFileFromPathInternal(
 
   let response: Response;
   try {
+    const requestBody = form as unknown as BodyInit;
     response = await fetch(buildClientUrl(client, "/Voucher/Factory/uploadTempFile"), {
       method: "POST",
       headers: {
         ...client.defaultHeaders,
         ...form.getHeaders(),
       },
-      body: form as unknown as BodyInit,
+      // `form-data` exposes a Node Readable stream, so we cast to BodyInit for Node's fetch runtime.
+      body: requestBody,
       // Node fetch requires duplex for streamed request bodies such as form-data's Readable stream.
       duplex: "half",
     } as RequestInit & { duplex: "half" });

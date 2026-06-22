@@ -36,7 +36,9 @@ function createTempUploadFile(fileName: string, bytes: Buffer): string {
 
 afterEach(() => {
   vi.restoreAllMocks();
-  for (const directory of tempDirectories.splice(0)) {
+  const directoriesToRemove = tempDirectories.slice();
+  tempDirectories.length = 0;
+  for (const directory of directoriesToRemove) {
     rmSync(directory, { recursive: true, force: true });
   }
 });
