@@ -1264,7 +1264,8 @@ async function uploadVoucherFileFromPathInternal(
   let response: Response;
   try {
     // `form-data` produces a Node Readable stream rather than the DOM FormData type accepted by TypeScript's BodyInit.
-    // Node's fetch implementation supports this at runtime, so the cast keeps the code aligned with the actual runtime contract.
+    // Node's fetch implementation supports this at runtime for streamed multipart uploads, so the cast keeps the code aligned
+    // with the actual Node.js runtime contract even though the DOM typings do not describe that interoperability.
     const requestBody = form as unknown as BodyInit;
     response = await fetch(buildClientUrl(client, "/Voucher/Factory/uploadTempFile"), {
       method: "POST",
@@ -1273,7 +1274,8 @@ async function uploadVoucherFileFromPathInternal(
         ...form.getHeaders(),
       },
       body: requestBody,
-      // Node fetch requires `duplex: "half"` whenever the request body is streamed, which is the case for form-data.
+      // Node fetch requires `duplex: "half"` whenever the request body is streamed; `form-data` uploads are backed by a
+      // Node Readable stream, so omitting this would make the multipart upload fail before sevDesk receives the file.
       duplex: "half",
     } as RequestInit & { duplex: "half" });
   } catch (error) {
@@ -1282,9 +1284,12 @@ async function uploadVoucherFileFromPathInternal(
 
   const responseText = await response.text();
   if (response.status !== 201) {
+    const statusSummary = response.statusText
+      ? `${response.status} - ${response.statusText}`
+      : String(response.status);
     throw new VoucherUploadError(
       "UPLOAD_FAILED",
-      `Upload failed with ${response.status}${response.statusText ? ` ${response.statusText}` : ""}: ${responseText || "(empty response body)"}`
+      `Upload failed with ${statusSummary}: ${responseText || "(empty response body)"}`
     );
   }
 

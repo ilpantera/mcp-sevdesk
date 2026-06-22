@@ -425,7 +425,7 @@ describe("upload_voucher_file", () => {
     expect(result.errors).toEqual([
       expect.objectContaining({
         code: "UPLOAD_FAILED",
-        message: expect.stringContaining("500 Server Error"),
+        message: expect.stringContaining("500 - Server Error"),
       }),
     ]);
     expect(result.errors[0]?.message).toContain("upload exploded");
