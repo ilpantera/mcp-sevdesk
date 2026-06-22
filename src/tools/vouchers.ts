@@ -1053,7 +1053,7 @@ async function extractPdfTextFromBytes(bytes: Buffer): Promise<{ text: string; p
 async function performOcrOnImageBuffer(imageBuffer: Buffer): Promise<{ text: string; warnings: string[] }> {
   try {
     const { createWorker } = await import("tesseract.js");
-    const worker = await createWorker(["eng", "deu"], undefined, { errorHandler: () => undefined });
+    const worker = await createWorker(["eng", "deu"]);
     try {
       const { data } = await worker.recognize(imageBuffer);
       const text = (data.text ?? "").trim();
@@ -1098,8 +1098,10 @@ function extractFirstJpegFromPdf(pdfBytes: Buffer): Buffer | null {
   }
   if (soiIndex === -1) return null;
 
-  // Search for EOI (FF D9) scanning backwards from end for the outermost JPEG
-  for (let i = pdfBytes.length - 2; i > soiIndex + 4; i--) {
+  // Search for EOI (FF D9) scanning backwards from end for the outermost JPEG.
+  // The minimum viable JPEG is SOI (2 bytes) + at least one 2-byte segment + EOI (2 bytes) = 6 bytes,
+  // so EOI can appear earliest at index soiIndex+4 (candidate[4..5] = FF D9 → 6-byte slice).
+  for (let i = pdfBytes.length - 2; i >= soiIndex + 4; i--) {
     if (pdfBytes[i] === 0xff && pdfBytes[i + 1] === 0xd9) {
       const candidate = pdfBytes.subarray(soiIndex, i + 2);
       // Sanity-check: the extracted slice must start with FF D8 FF and end with FF D9

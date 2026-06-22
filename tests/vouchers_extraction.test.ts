@@ -248,6 +248,19 @@ describe("extract_voucher_document_text", () => {
     expect(result.warnings.some((w) => /OCR failed/i.test(w))).toBe(true);
   });
 
+  it("returns source=none with warning when OCR throws on a PNG document", async () => {
+    mockOcrThrows("WASM out of memory");
+    const GET = buildGetMock(80, makePngBuffer());
+
+    const result = await voucherTools.extract_voucher_document_text.handler(
+      { GET } as unknown as SevdeskClient,
+      { voucherId: 1 }
+    );
+
+    expect(result.source).toBe("none");
+    expect(result.warnings.some((w) => /OCR failed/i.test(w))).toBe(true);
+  });
+
   it("throws when voucher has no document attached", async () => {
     const GET = vi.fn().mockResolvedValueOnce({
       data: { objects: [{ id: 1 }] },
