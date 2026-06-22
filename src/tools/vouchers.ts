@@ -851,6 +851,10 @@ async function extractDocumentTextInternal(
   };
 }
 
+// Heuristic XML tag extractors: match simple element text content.
+// Known limitations: will not handle CDATA sections or elements containing
+// nested child elements (only works for leaf text nodes).  These helpers are
+// intentionally lightweight – the structured e-invoice path is best-effort.
 function extractFirstXmlTagContent(xml: string, ...tagNames: string[]): string | null {
   for (const tag of tagNames) {
     const escapedTag = tag.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
@@ -1019,15 +1023,11 @@ export function extractFactsFromPlainText(text: string): Partial<VoucherFactsRes
     };
   }
 
-  // Invoice number
-  const invoiceNumberMatch =
-    text.match(/Rechnungsnummer[:\s#]*([A-Za-z0-9\-_\/\.]{3,30})/i) ??
-    text.match(/Rechnungs-?Nr\.?[:\s#]*([A-Za-z0-9\-_\/\.]{3,30})/i) ??
-    text.match(/RE-Nr\.?[:\s#]*([A-Za-z0-9\-_\/\.]{3,30})/i) ??
-    text.match(/Invoice\s+(?:No|Number|Nr)\.?[:\s#]*([A-Za-z0-9\-_\/\.]{3,30})/i) ??
-    text.match(/\b(RE-\d[\w\-\/\.]{2,20})\b/i) ??
-    text.match(/\b(INV-\d[\w\-\/\.]{2,20})\b/i);
-  const invoiceNumber = invoiceNumberMatch?.[1]?.trim() ?? null;
+  // Invoice number – consolidated alternation pattern covering common German and English labels
+  const invoiceNumberMatch = text.match(
+    /(?:Rechnungsnummer|Rechnungs-?Nr\.|RE-Nr\.|Invoice\s+(?:No|Number|Nr)\.?)[:\s#]*([A-Za-z0-9\-_\/\.]{3,30})|\b(RE-\d[\w\-\/\.]{2,20})\b|\b(INV-\d[\w\-\/\.]{2,20})\b/i
+  );
+  const invoiceNumber = (invoiceNumberMatch?.[1] ?? invoiceNumberMatch?.[2] ?? invoiceNumberMatch?.[3])?.trim() ?? null;
 
   // Invoice date
   const dateMatch =
