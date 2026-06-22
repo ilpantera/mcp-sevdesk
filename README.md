@@ -73,10 +73,8 @@ SEVDESK_API_TOKEN="dein-token" npm start
 | `get_voucher_booking_context_batch` | read | Strukturierte Batch-Variante des Booking Context |
 | `get_voucher_document_info` | read | Dokument-Metadaten eines Belegs (documentId, Dateiname, MIME-Typ, hasPdf, hasImagePreview) |
 | `get_voucher_document_info_batch` | read | Batch-Variante von `get_voucher_document_info` für bis zu 50 Belege |
-| `extract_voucher_document_text` | read | Lädt das Belegdokument serverseitig herunter und extrahiert den Text (PDF-Textlayer-first, mit OCR-Fallback für Bilder/gescannte PDFs) |
-| `extract_voucher_document_text_batch` | read | Batch-Variante von `extract_voucher_document_text` für bis zu 20 Belege |
-| `extract_voucher_facts` | read | Extrahiert strukturierte Belegdaten (Lieferant, Rechnungsnummer, Betrag, …) – E-Invoice-first, dann Text-Heuristiken, dann OCR |
-| `extract_voucher_facts_batch` | read | Batch-Variante von `extract_voucher_facts` für bis zu 20 Belege |
+| `get_voucher_original_pdf` | read | Liefert das Original-PDF eines Belegs als Base64-Payload (primär via `GET /Export/voucherZip`, deterministisch gemappt) |
+| `get_voucher_original_pdf_batch` | read | Batch-Variante von `get_voucher_original_pdf` für bis zu 20 Belege |
 | `validate_voucher_booking_plan` | read | Strikte lokale Validierung eines Voucher-Buchungsplans, optional mit Receipt Guidance |
 | `apply_voucher_booking_plan` | write | Empfohlenes High-Level-Tool für konsistente Voucher-Buchung |
 | `get_receipt_guidance` | read | Erlaubte Konto-/TaxRule-/TaxRate-Kombinationen aus sevDesk |
@@ -124,132 +122,56 @@ Diese Bereiche bleiben bewusst **low-level**. Für Update 2.0 werden Statuswechs
 - Tags
 - Reports
 
-## Serverseitige Dokumentenextraktion (inkl. OCR)
+## PDF-first Dokumentworkflow
 
-`extract_voucher_document_text` und `extract_voucher_facts` laden Belegdokumente **serverseitig** herunter und geben kompakten Text bzw. strukturierte Daten zurück – Claude arbeitet damit statt mit rohen PDF-/Base64-Payloads.
+Der MCP liefert Original-PDFs für Claude/Cowork als Primärartefakt. Serverseitige OCR/Text-/Faktenextraktion ist kein empfohlener Workflow mehr.
 
-Primär wird `/Document/{documentId}` verwendet. Falls dieser Download fehlschlägt, nutzt der MCP optional `GET /Export/voucherZip` als serverseitigen Fallback: ZIP-Content wird im MCP dekodiert/entpackt, deterministisch über den sevDesk-Dokumentnamen gemappt und dann normal extrahiert. Bei fehlender/mehrdeutiger Zuordnung wird **nicht geraten**, sondern eine explizite Warnung/Fehlermeldung erzeugt.
+Primärpfad für den Dokumentabruf ist `GET /Export/voucherZip`:
+
+1. MCP lädt den voucherZip-Export
+2. dekodiert Base64 serverseitig
+3. entpackt die ZIP-Einträge serverseitig
+4. mappt den Eintrag deterministisch über Dateiname/Dokument-ID
+5. liefert das Original-PDF als Base64-Payload an den MCP-Client
+
+Wenn die voucherZip-Route fehlschlägt, wird ein expliziter Fallback auf `/Document/{documentId}` genutzt und als Warnung im Ergebnis markiert.
 
 ### Ablauf (empfohlene Reihenfolge)
 
 1. Entwurfs-Belege laden: `list_vouchers(status="50")`
-2. Strukturierte Fakten extrahieren: `extract_voucher_facts_batch(voucherIds)`
-   - Liefert Lieferant, Rechnungsnummer, Datum, Währung, Beträge
-   - Bevorzugt E-Invoice-Daten (ZUGFeRD/XRechnung) wenn vorhanden
-   - Fällt auf PDF-Textextraktion zurück, dann bei Bedarf auf OCR
-3. Nur bei fehlenden Feldern oder `source: "none"`: `extract_voucher_document_text(voucherId)` → Claude wertet den Rohtext aus
-4. Buchungsplan erstellen und validieren: `validate_voucher_booking_plan`
-5. Plan schreiben: `apply_voucher_booking_plan`
+2. Dokument-Metadaten abrufen: `get_voucher_document_info_batch(voucherIds)`
+3. PDF-Artefakte laden: `get_voucher_original_pdf_batch(voucherIds)` (oder einzeln `get_voucher_original_pdf`)
+4. Claude/Cowork prüft die Original-PDFs direkt
+5. Buchungsplan erstellen und validieren: `validate_voucher_booking_plan`
+6. Plan schreiben: `apply_voucher_booking_plan`
 
-### Rückgabeformat `extract_voucher_facts`
+### Rückgabeformat `get_voucher_original_pdf`
 
 ```json
 {
   "voucherId": 147848515,
   "documentId": 123456,
-  "source": "einvoice",
-  "supplier": "Lieferant GmbH",
-  "invoiceNumber": "RE-2024-001",
-  "invoiceDate": "2024-01-15",
-  "currency": "EUR",
-  "creditDebitHint": null,
-  "positions": [
-    { "description": "Beratungsleistung", "taxRate": 19, "sumNet": 100.00, "sumGross": 119.00 }
-  ],
-  "totals": { "net": 100.00, "gross": 119.00, "tax": 19.00 },
+  "source": "voucherZip",
+  "fileName": "a1b2c3d4.pdf",
+  "mimeType": "application/pdf",
+  "contentBase64": "<base64-pdf>",
+  "sizeBytes": 48321,
   "warnings": []
 }
 ```
 
-Mögliche Werte für `source`:
+`source`:
 
 | Wert | Bedeutung |
 |---|---|
-| `einvoice` | Alle Felder aus ZUGFeRD/XRechnung-XML |
-| `mixed` | E-Invoice + PDF-Text zusammengeführt |
-| `pdf-text` | Nur PDF-Textlayer + Regex-Heuristiken |
-| `ocr` | Serverseitige OCR (tesseract.js/WASM) auf Bilddokument oder gescanntem PDF |
-| `none` | Kein Text extrahierbar; alle Felder sind `null` |
+| `voucherZip` | Primärpfad `GET /Export/voucherZip` erfolgreich |
+| `document-download-fallback` | voucherZip fehlgeschlagen, `/Document/{documentId}` als Fallback genutzt |
 
-### Rückgabeformat `extract_voucher_document_text`
+### Hinweise
 
-```json
-{
-  "voucherId": 147848515,
-  "documentId": 123456,
-  "source": "ocr",
-  "pages": 1,
-  "text": "Lieferant GmbH\nRechnungsnummer: RE-2024-001\n...",
-  "warnings": []
-}
-```
-
-### Serverseitige OCR
-
-Für JPEG-, PNG- und TIFF-Dokumente sowie für gescannte PDFs ohne Textlayer führt der MCP **automatisch OCR serverseitig durch** (tesseract.js, WASM-basiert, keine Systemabhängigkeit).
-
-- **Beim ersten Aufruf** werden Sprachmodell-Daten (Englisch + Deutsch) heruntergeladen und lokal gecacht. Dieser Vorgang kann beim ersten Start einige Sekunden dauern.
-- Bei erfolgreicher OCR: `source: "ocr"`, Feld `text` enthält den erkannten Text.
-- Bei fehlgeschlagener OCR: `source: "none"`, Feld `warnings` enthält einen erklärenden Hinweis.
-
-**OCR-Einschränkungen und Hinweise:**
-
-| Aspekt | Details |
-|---|---|
-| Sprachen | Englisch + Deutsch (Standard). Weitere Sprachen erfordern Anpassung der Konfiguration. |
-| Bildqualität | OCR liefert zuverlässige Ergebnisse bei Auflösung ≥ 150 dpi. Sehr niedrige Auflösung oder starke Artefakte können Erkennungsqualität reduzieren. |
-| Gescannte PDFs | OCR wird auf eingebettete JPEG-Bilder im PDF angewendet. PDFs mit anderen Bildformaten (CCITT/G4, PNG-Streams) werden ggf. nicht erkannt. |
-| Mehrseiter | Bei mehrseitigen gescannten PDFs wird nur die erste eingebettete JPEG-Seite verarbeitet. |
-| Erstlauf-Latenz | ~5–15 s beim ersten Start (WASM-Initialisierung + Sprachmodell-Download). Folgeaufrufe sind deutlich schneller. |
-| Keine Halluzination | Der MCP erfindet keine Felder. Wenn OCR-Text keine sicheren Werte liefert, bleiben Felder `null` mit Warnung. |
-
-### Hinweise und Einschränkungen
-
-- **Durchsuchbare PDFs** (mit Textlayer, z. B. von modernen Scannern oder digitalen Rechnungen): vollständige Textextraktion ohne OCR.
-- **Bildbasierte PDFs** (gescannte Seiten ohne Textlayer): OCR auf eingebettetes JPEG → `source: "ocr"` bei Erfolg, `source: "none"` bei Misserfolg.
-- **JPEG/PNG/TIFF-Dokumente**: direkte OCR → `source: "ocr"` bei Erfolg, `source: "none"` bei Misserfolg.
-- **VoucherZip-Fallback**: dient nur als zusätzliche serverseitige Dokumentquelle für die Extraktion. ZIP/PDF-Rohdaten werden nicht als Primärworkflow an Claude durchgereicht.
-- Felder, die nicht zuverlässig bestimmt werden können, sind `null` mit erklärender Warnung.
-- Die Batch-Varianten erlauben bis zu **20 Belege** pro Aufruf.
-
-## PDF-first Review Workflow
-
-`get_voucher_document_info` und `get_voucher_document_info_batch` ermöglichen einen **PDF-first Review Workflow**, bei dem Claude das Originaldokument direkt liest, während der MCP den sevDesk-Zustand verwaltet und Schreiboperationen ausführt.
-
-### Ablauf
-
-1. Entwurfs-Belege laden: `list_vouchers(status="50")`
-2. Dokument-Metadaten abrufen: `get_voucher_document_info_batch(voucherIds)`
-3. Für Belege mit `hasPdf: true`: PDF direkt von Claude analysieren (über `voucherId` oder `documentId` referenziert)
-4. Buchungsplan erstellen und validieren: `validate_voucher_booking_plan`
-5. Plan schreiben: `apply_voucher_booking_plan`
-
-### Rückgabeformat
-
-```json
-{
-  "voucherId": 147848515,
-  "document": {
-    "documentId": 123456,
-    "fileName": "a1b2c3d4.pdf",
-    "mimeType": "application/pdf",
-    "hasPdf": true,
-    "hasImagePreview": true
-  }
-}
-```
-
-Felder:
-
-| Feld | Typ | Beschreibung |
-|---|---|---|
-| `documentId` | `number` | Interne sevDesk-Dokument-ID |
-| `fileName` | `string \| null` | Interner Hash-Dateiname aus sevDesk (z. B. `a1b2c3d4.pdf`) |
-| `mimeType` | `string \| null` | MIME-Typ des Original-Dokuments (z. B. `application/pdf`) |
-| `hasPdf` | `boolean` | `true` wenn das Originaldokument ein PDF ist |
-| `hasImagePreview` | `boolean` | `true` wenn sevDesk eine Bildvorschau bereitstellt |
-
-Wenn kein Dokument angehängt ist, wird `document: null` zurückgegeben. Wenn das Dokument vorhanden ist, aber Metadaten nicht abrufbar sind, werden `fileName` und `mimeType` als `null` und `hasPdf`/`hasImagePreview` als `false` zurückgegeben.
+- Die Zuordnung eines ZIP-Eintrags erfolgt bewusst deterministisch; bei Mehrdeutigkeit wird ein Fehler statt Raten zurückgegeben.
+- `get_voucher_document_info` bleibt der schnelle Metadaten-Call vor dem PDF-Download.
+- Schreiboperationen (Voucher-Status, Positionen, Buchung) laufen weiter über die bestehenden MCP-Tools.
 
 ## Voucher-Booking-Plan (empfohlener Workflow)
 

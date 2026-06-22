@@ -1,16 +1,5 @@
 import { z } from "zod";
-import { createRequire } from "node:module";
 import { inflateRawSync, inflateSync } from "node:zlib";
-// Use createRequire to load pdf-parse's internal entry point directly.
-// This bypasses the diagnostic test-data loading that pdf-parse's main entry
-// point performs (it reads `./test/data/05-versions-space.pdf` which fails in
-// sandboxed or read-only environments).  createRequire is the ESM-compatible
-// way to call require() – the plain require() form is not available in ES modules.
-const _require = createRequire(import.meta.url);
-const pdfParse = _require("pdf-parse/lib/pdf-parse.js") as (
-  dataBuffer: Buffer,
-  options?: { max?: number }
-) => Promise<{ numpages: number; text: string }>;
 import type { SevdeskClient } from "../client.js";
 
 type EInvoiceCheckResult = {
@@ -77,8 +66,7 @@ export type VoucherBookingPlanIssueCode =
   | "IMAGE_READ_FAILED"
   | "DOCUMENT_INFO_READ_FAILED"
   | "STATUS_CHANGE_NOT_SUPPORTED"
-  | "DOCUMENT_DOWNLOAD_FAILED"
-  | "DOCUMENT_TEXT_EXTRACTION_FAILED";
+  | "DOCUMENT_DOWNLOAD_FAILED";
 
 export type VoucherBookingPlanIssue = {
   code: VoucherBookingPlanIssueCode;
@@ -165,41 +153,14 @@ type VoucherZipEntry = {
   bytes: Buffer;
 };
 
-type DocumentTextSource = "pdf-text" | "ocr" | "none";
-
-type DocumentTextResult = {
+type VoucherOriginalPdfResult = {
   voucherId: number;
   documentId: number;
-  source: DocumentTextSource;
-  pages: number | null;
-  text: string;
-  warnings: string[];
-};
-
-type VoucherFactsPosition = {
-  description: string | null;
-  taxRate: number | null;
-  sumNet: number | null;
-  sumGross: number | null;
-};
-
-type VoucherFactsSource = "pdf-text" | "ocr" | "einvoice" | "mixed" | "none";
-
-type VoucherFactsResult = {
-  voucherId: number;
-  documentId: number;
-  source: VoucherFactsSource;
-  supplier: string | null;
-  invoiceNumber: string | null;
-  invoiceDate: string | null;
-  currency: string | null;
-  creditDebitHint: "C" | "D" | null;
-  positions: VoucherFactsPosition[];
-  totals: {
-    net: number | null;
-    gross: number | null;
-    tax: number | null;
-  };
+  source: "voucherZip" | "document-download-fallback";
+  fileName: string | null;
+  mimeType: "application/pdf";
+  contentBase64: string;
+  sizeBytes: number;
   warnings: string[];
 };
 
@@ -268,10 +229,6 @@ const RECEIPT_GUIDANCE_TAX_RATE_MAP: Record<string, number> = {
   SEVEN: 7,
   NINETEEN: 19,
 };
-// Minimum character count for extracted PDF text to be considered meaningful.
-// Shorter results indicate a text-layer-free (image-only) PDF page.
-const MIN_MEANINGFUL_TEXT_LENGTH = 20;
-
 function callUntypedClientMethod(
   client: SevdeskClient,
   method: "GET" | "DELETE" | "PUT" | "POST",
@@ -922,7 +879,7 @@ async function downloadDocumentBytesViaVoucherZipInternal(
   client: SevdeskClient,
   voucherId: number,
   documentId: number
-): Promise<{ bytes: Buffer; warnings: string[] }> {
+): Promise<{ bytes: Buffer; fileName: string; warnings: string[] }> {
   const documentInfo = await getVoucherDocumentInfoInternal(client, voucherId);
   const filterCandidates: Record<string, unknown>[] = [{ id: voucherId }, { id: { "$eq": voucherId } }];
   const attemptErrors: string[] = [];
@@ -960,24 +917,48 @@ async function downloadDocumentBytesViaVoucherZipInternal(
 
     return {
       bytes: picked.entry.bytes,
-      warnings: [...combinedWarnings, `Document loaded via Export/voucherZip fallback from "${picked.entry.fileName}".`],
+      fileName: picked.entry.fileName.split("/").pop() ?? picked.entry.fileName,
+      warnings: [...combinedWarnings, `Document loaded via Export/voucherZip primary path from "${picked.entry.fileName}".`],
     };
   }
 
   throw new Error(attemptErrors.join("; "));
 }
 
-async function downloadDocumentBytesInternal(
+function isPdfBuffer(bytes: Buffer): boolean {
+  return bytes.length >= 4 && bytes.subarray(0, 4).toString("ascii") === "%PDF";
+}
+
+async function downloadVoucherOriginalPdfInternal(
   client: SevdeskClient,
   voucherId: number
-): Promise<{ documentId: number; bytes: Buffer; warnings: string[] }> {
+): Promise<VoucherOriginalPdfResult> {
   const voucherData = await getVoucherByIdInternal(client, voucherId);
   const documentId = getVoucherDocumentId(voucherData as VoucherResponseData | undefined);
   if (!documentId) {
     throw new Error("Voucher has no document attached");
   }
+  const documentInfo = await getVoucherDocumentInfoInternal(client, voucherId);
 
   try {
+    const voucherZipResult = await downloadDocumentBytesViaVoucherZipInternal(client, voucherId, documentId);
+    if (!isPdfBuffer(voucherZipResult.bytes)) {
+      throw new Error(
+        `Export/voucherZip mapping succeeded but selected file "${voucherZipResult.fileName}" is not a PDF`
+      );
+    }
+
+    return {
+      documentId,
+      voucherId,
+      source: "voucherZip",
+      fileName: voucherZipResult.fileName,
+      mimeType: "application/pdf",
+      contentBase64: voucherZipResult.bytes.toString("base64"),
+      sizeBytes: voucherZipResult.bytes.length,
+      warnings: voucherZipResult.warnings,
+    };
+  } catch (voucherZipError) {
     const { data: documentData, error: documentError } = await callUntypedClientMethod(
       client,
       "GET",
@@ -987,578 +968,35 @@ async function downloadDocumentBytesInternal(
         parseAs: "arrayBuffer",
       }
     );
-    if (documentError) throw new Error(JSON.stringify(documentError));
+    if (documentError) {
+      throw new Error(
+        `Export/voucherZip primary retrieval failed: ${getErrorMessage(voucherZipError)}; ` +
+          `fallback /Document/{documentId} failed: ${JSON.stringify(documentError)}`
+      );
+    }
     if (!(documentData instanceof ArrayBuffer)) {
       throw new Error("Document download did not return raw bytes");
     }
-    return { documentId, bytes: Buffer.from(documentData), warnings: [] };
-  } catch (directDownloadError) {
-    const fallbackResult = await downloadDocumentBytesViaVoucherZipInternal(client, voucherId, documentId);
-    return {
-      documentId,
-      bytes: fallbackResult.bytes,
-      warnings: [
-        `Direct /Document download failed: ${getErrorMessage(directDownloadError)}`,
-        ...fallbackResult.warnings,
-      ],
-    };
-  }
-}
-
-function detectDocumentType(bytes: Buffer): "pdf" | "image" | "unknown" {
-  if (bytes.length >= 4 && bytes.subarray(0, 4).toString("ascii") === "%PDF") {
-    return "pdf";
-  }
-  // JPEG: FF D8 FF
-  if (bytes.length >= 3 && bytes[0] === 0xff && bytes[1] === 0xd8 && bytes[2] === 0xff) {
-    return "image";
-  }
-  // PNG: 89 50 4E 47
-  if (bytes.length >= 4 && bytes[0] === 0x89 && bytes[1] === 0x50 && bytes[2] === 0x4e && bytes[3] === 0x47) {
-    return "image";
-  }
-  // TIFF: 49 49 2A 00 or 4D 4D 00 2A
-  if (bytes.length >= 4 && ((bytes[0] === 0x49 && bytes[1] === 0x49) || (bytes[0] === 0x4d && bytes[1] === 0x4d))) {
-    return "image";
-  }
-  return "unknown";
-}
-
-async function extractPdfTextFromBytes(bytes: Buffer): Promise<{ text: string; pages: number; warnings: string[] }> {
-  const warnings: string[] = [];
-  try {
-    const result = await pdfParse(bytes, { max: 0 });
-    const text = (result.text ?? "").trim();
-    const pages = result.numpages ?? 0;
-    if (text.length < MIN_MEANINGFUL_TEXT_LENGTH) {
-      warnings.push(
-        "PDF contains no text layer (likely a scanned image PDF). " +
-          "For OCR support, consider using direct PDF review in Claude."
-      );
-    }
-    return { text, pages, warnings };
-  } catch (err) {
-    warnings.push(`PDF text extraction failed: ${getErrorMessage(err)}`);
-    return { text: "", pages: 0, warnings };
-  }
-}
-
-/**
- * Perform OCR on an image buffer using tesseract.js (WASM-based, no system deps).
- * Languages: English + German (covers most EU invoices).
- * Language data is downloaded from the tesseract.js CDN on first use and cached
- * in the system temp directory – first run may take a few seconds.
- * Returns { text, warnings } and never throws.
- */
-async function performOcrOnImageBuffer(imageBuffer: Buffer): Promise<{ text: string; warnings: string[] }> {
-  try {
-    const { createWorker } = await import("tesseract.js");
-    const worker = await createWorker(["eng", "deu"]);
-    try {
-      const { data } = await worker.recognize(imageBuffer);
-      const text = (data.text ?? "").trim();
-      const warnings: string[] = [];
-      if (text.length < MIN_MEANINGFUL_TEXT_LENGTH) {
-        warnings.push(
-          "OCR produced no usable text. The document may be low-quality, rotated, or contain no recognizable text."
-        );
-      }
-      return { text, warnings };
-    } finally {
-      await worker.terminate();
-    }
-  } catch (err) {
-    return { text: "", warnings: [`OCR failed: ${getErrorMessage(err)}`] };
-  }
-}
-
-/**
- * Heuristic: search the raw PDF byte stream for embedded JPEG data (DCTDecode /
- * JFIF / EXIF SOI marker FF D8 FF).  Most phone-scanner and office-scanner PDFs
- * embed the scanned page as a single JPEG object – this extractor finds the first
- * such image and returns its raw bytes so they can be passed to OCR.
- *
- * Limitations:
- * - Only finds JPEG images, not PNG or CCITT/G4 compressed pages.
- * - Returns only the first JPEG found (single-page scans are the common case).
- * - Not reliable for multi-stream or heavily compressed PDFs.
- */
-function extractFirstJpegFromPdf(pdfBytes: Buffer): Buffer | null {
-  const SOI_0 = 0xff;
-  const SOI_1 = 0xd8;
-  // Minimum: SOI (2 bytes) + at least one segment + EOI (2 bytes)
-  if (pdfBytes.length < 6) return null;
-
-  let soiIndex = -1;
-  for (let i = 0; i <= pdfBytes.length - 3; i++) {
-    if (pdfBytes[i] === SOI_0 && pdfBytes[i + 1] === SOI_1 && pdfBytes[i + 2] === SOI_0) {
-      soiIndex = i;
-      break;
-    }
-  }
-  if (soiIndex === -1) return null;
-
-  // Search for EOI (FF D9) scanning backwards from end for the outermost JPEG.
-  // The minimum viable JPEG is SOI (2 bytes) + at least one 2-byte segment + EOI (2 bytes) = 6 bytes,
-  // so the earliest absolute position for the EOI pair is soiIndex+4 (pdfBytes[soiIndex+4..+5] = FF D9),
-  // which would yield a 6-byte candidate slice (candidate[4..5] = FF D9).
-  for (let i = pdfBytes.length - 2; i >= soiIndex + 4; i--) {
-    if (pdfBytes[i] === 0xff && pdfBytes[i + 1] === 0xd9) {
-      const candidate = pdfBytes.subarray(soiIndex, i + 2);
-      // Sanity-check: the extracted slice must start with FF D8 FF and end with FF D9
-      if (candidate.length >= 6) {
-        return candidate;
-      }
-    }
-  }
-  return null;
-}
-
-async function extractDocumentTextInternal(
-  client: SevdeskClient,
-  voucherId: number
-): Promise<DocumentTextResult> {
-  const { documentId, bytes, warnings: downloadWarnings } = await downloadDocumentBytesInternal(client, voucherId);
-  const docType = detectDocumentType(bytes);
-
-  if (docType === "pdf") {
-    const { text, pages, warnings: textWarnings } = await extractPdfTextFromBytes(bytes);
-    if (text.length >= MIN_MEANINGFUL_TEXT_LENGTH) {
-      return {
-        voucherId,
-        documentId,
-        source: "pdf-text",
-        pages,
-        text,
-        warnings: [...downloadWarnings, ...textWarnings],
-      };
+    const bytes = Buffer.from(documentData);
+    if (!isPdfBuffer(bytes)) {
+      throw new Error("Fallback /Document download is not a PDF document");
     }
 
-    // PDF has no meaningful text layer – attempt OCR on embedded JPEG image
-    const jpegBytes = extractFirstJpegFromPdf(bytes);
-    if (jpegBytes) {
-      const { text: ocrText, warnings: ocrWarnings } = await performOcrOnImageBuffer(jpegBytes);
-      if (ocrText.length >= MIN_MEANINGFUL_TEXT_LENGTH) {
-        return {
-          voucherId,
-          documentId,
-          source: "ocr",
-          pages,
-          text: ocrText,
-          warnings: [...downloadWarnings, ...textWarnings, ...ocrWarnings],
-        };
-      }
-      return {
-        voucherId,
-        documentId,
-        source: "none",
-        pages,
-        text: "",
-        warnings: [
-          ...downloadWarnings,
-          ...textWarnings,
-          ...ocrWarnings,
-          "Scanned PDF: no embedded JPEG yielded usable OCR text.",
-        ],
-      };
-    }
-
-    // No embedded JPEG found; cannot do OCR on this PDF
+    const fileName = documentInfo?.fileName ?? `document-${documentId}.pdf`;
     return {
       voucherId,
       documentId,
-      source: "none",
-      pages,
-      text: "",
+      source: "document-download-fallback",
+      fileName,
+      mimeType: "application/pdf",
+      contentBase64: bytes.toString("base64"),
+      sizeBytes: bytes.length,
       warnings: [
-        ...downloadWarnings,
-        ...textWarnings,
-        "Scanned PDF has no extractable text layer and no embedded JPEG for OCR.",
+        `Export/voucherZip primary retrieval failed: ${getErrorMessage(voucherZipError)}`,
+        "Original PDF returned from fallback /Document/{documentId} download.",
       ],
     };
   }
-
-  if (docType === "image") {
-    const { text: ocrText, warnings: ocrWarnings } = await performOcrOnImageBuffer(bytes);
-    if (ocrText.length >= MIN_MEANINGFUL_TEXT_LENGTH) {
-      return {
-        voucherId,
-        documentId,
-        source: "ocr",
-        pages: 1,
-        text: ocrText,
-        warnings: [...downloadWarnings, ...ocrWarnings],
-      };
-    }
-    return {
-      voucherId,
-      documentId,
-      source: "none",
-      pages: 1,
-      text: "",
-      warnings: [
-        ...downloadWarnings,
-        ...ocrWarnings,
-        "Image document: OCR produced no usable text. The image may be low-quality or unsupported.",
-      ],
-    };
-  }
-
-  return {
-    voucherId,
-    documentId,
-    source: "none",
-    pages: null,
-    text: "",
-    warnings: [...downloadWarnings, "Unknown document type; text extraction not supported for this format."],
-  };
-}
-
-// Heuristic XML tag extractors: match simple element text content.
-// Known limitations: will not handle CDATA sections or elements containing
-// nested child elements (only works for leaf text nodes).  These helpers are
-// intentionally lightweight – the structured e-invoice path is best-effort.
-function extractFirstXmlTagContent(xml: string, ...tagNames: string[]): string | null {
-  for (const tag of tagNames) {
-    const escapedTag = tag.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-    const pattern = new RegExp(`<(?:[\\w:]*:)?${escapedTag}[^>]*>([^<]+)<\\/(?:[\\w:]*:)?${escapedTag}>`, "i");
-    const match = xml.match(pattern);
-    if (match?.[1]?.trim()) {
-      return match[1].trim();
-    }
-  }
-  return null;
-}
-
-function extractAllXmlTagContents(xml: string, tagName: string): string[] {
-  const escapedTag = tagName.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-  const pattern = new RegExp(`<(?:[\\w:]*:)?${escapedTag}[^>]*>([^<]+)<\\/(?:[\\w:]*:)?${escapedTag}>`, "gi");
-  return Array.from(xml.matchAll(pattern), (m) => m[1].trim()).filter((v) => v.length > 0);
-}
-
-function parseAmountString(value: string | null): number | null {
-  if (!value) return null;
-  const cleaned = value.replace(/\s/g, "").replace(",", ".");
-  const num = parseFloat(cleaned);
-  return Number.isFinite(num) ? num : null;
-}
-
-export function parseInvoiceDateString(raw: string | null): string | null {
-  if (!raw) return null;
-
-  // ISO format (ZUGFeRD compact: "20240115")
-  if (/^\d{8}$/.test(raw)) {
-    return `${raw.slice(0, 4)}-${raw.slice(4, 6)}-${raw.slice(6, 8)}`;
-  }
-  // ISO YYYY-MM-DD
-  if (/^\d{4}-\d{2}-\d{2}$/.test(raw)) {
-    return raw;
-  }
-  // German DD.MM.YYYY
-  const germanMatch = raw.match(/^(\d{1,2})\.(\d{1,2})\.(\d{4})$/);
-  if (germanMatch) {
-    return `${germanMatch[3]}-${germanMatch[2].padStart(2, "0")}-${germanMatch[1].padStart(2, "0")}`;
-  }
-  // DD/MM/YYYY
-  const slashMatch = raw.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})$/);
-  if (slashMatch) {
-    return `${slashMatch[3]}-${slashMatch[2].padStart(2, "0")}-${slashMatch[1].padStart(2, "0")}`;
-  }
-  return null;
-}
-
-function extractFactsFromZUGFeRD(xml: string): Partial<VoucherFactsResult> {
-  const warnings: string[] = [];
-
-  const invoiceNumber = extractFirstXmlTagContent(xml, "ID");
-  const rawDate = extractFirstXmlTagContent(xml, "DateTimeString", "IssueDateTime");
-  const invoiceDate = parseInvoiceDateString(rawDate);
-  if (rawDate && !invoiceDate) {
-    warnings.push(`Could not parse invoice date: "${rawDate}"`);
-  }
-
-  const supplier = extractFirstXmlTagContent(xml, "Name");
-  const currency = extractFirstXmlTagContent(xml, "InvoiceCurrencyCode");
-
-  const netStr = extractFirstXmlTagContent(xml, "TaxBasisTotalAmount");
-  const taxStr = extractFirstXmlTagContent(xml, "TaxTotalAmount");
-  const grossStr = extractFirstXmlTagContent(xml, "GrandTotalAmount", "DuePayableAmount");
-
-  const net = parseAmountString(netStr);
-  const tax = parseAmountString(taxStr);
-  const gross = parseAmountString(grossStr);
-
-  // Extract line items
-  const lineItemBlocks = xml.match(
-    /<(?:[\w]*:)?IncludedSupplyChainTradeLineItem[\s\S]*?<\/(?:[\w]*:)?IncludedSupplyChainTradeLineItem>/gi
-  ) ?? [];
-  const positions: VoucherFactsPosition[] = lineItemBlocks.map((block) => {
-    const description = extractFirstXmlTagContent(block, "Name");
-    const taxRateStr = extractFirstXmlTagContent(block, "RateApplicablePercent", "ApplicablePercent");
-    const taxRate = parseAmountString(taxRateStr);
-    const netAmtStr = extractFirstXmlTagContent(block, "LineTotalAmount", "NetAmount");
-    const sumNet = parseAmountString(netAmtStr);
-    const sumGross = sumNet !== null && taxRate !== null
-      ? calculateGross(sumNet, taxRate)
-      : null;
-    return { description, taxRate, sumNet, sumGross };
-  });
-
-  if (!invoiceNumber) warnings.push("Invoice number not found in e-invoice XML.");
-  if (!supplier) warnings.push("Supplier name not found in e-invoice XML.");
-  if (!invoiceDate) warnings.push("Invoice date not found in e-invoice XML.");
-
-  return { invoiceNumber, invoiceDate, supplier, currency, positions, totals: { net, gross, tax }, warnings };
-}
-
-function extractFactsFromXRechnung(xml: string): Partial<VoucherFactsResult> {
-  const warnings: string[] = [];
-
-  // Best-effort heuristic: in a UBL Invoice/CreditNote the first <*:ID> element
-  // is typically the document ID.  Edge cases with multiple ID-bearing namespace
-  // prefixes may return a non-invoice ID – callers should treat this as a hint.
-  const idMatches = Array.from(
-    xml.matchAll(/<(?:[\w]*:)?ID[^>]*>([^<]+)<\/(?:[\w]*:)?ID>/gi)
-  );
-  const invoiceNumber = idMatches[0]?.[1]?.trim() || null;
-
-  const rawDate = extractFirstXmlTagContent(xml, "IssueDate");
-  const invoiceDate = parseInvoiceDateString(rawDate);
-  if (rawDate && !invoiceDate) {
-    warnings.push(`Could not parse invoice date: "${rawDate}"`);
-  }
-
-  const currency = extractFirstXmlTagContent(xml, "DocumentCurrencyCode");
-
-  // Supplier: look within AccountingSupplierParty block
-  const supplierBlock = xml.match(
-    /<(?:[\w]*:)?AccountingSupplierParty[\s\S]*?<\/(?:[\w]*:)?AccountingSupplierParty>/i
-  )?.[0] ?? "";
-  const supplier = supplierBlock ? extractFirstXmlTagContent(supplierBlock, "Name") : null;
-
-  // Totals from LegalMonetaryTotal
-  const totalsBlock = xml.match(
-    /<(?:[\w]*:)?LegalMonetaryTotal[\s\S]*?<\/(?:[\w]*:)?LegalMonetaryTotal>/i
-  )?.[0] ?? "";
-  const netStr = totalsBlock ? extractFirstXmlTagContent(totalsBlock, "TaxExclusiveAmount") : null;
-  const grossStr = totalsBlock
-    ? extractFirstXmlTagContent(totalsBlock, "TaxInclusiveAmount", "PayableAmount")
-    : null;
-  const net = parseAmountString(netStr);
-  const gross = parseAmountString(grossStr);
-  const tax = net !== null && gross !== null ? roundCurrency(gross - net) : null;
-
-  // Line items
-  const lineBlocks = xml.match(
-    /<(?:[\w]*:)?InvoiceLine[\s\S]*?<\/(?:[\w]*:)?InvoiceLine>/gi
-  ) ?? [];
-  const positions: VoucherFactsPosition[] = lineBlocks.map((block) => {
-    const description = extractFirstXmlTagContent(block, "Name", "Description");
-    const taxRateStr = extractFirstXmlTagContent(block, "Percent");
-    const taxRate = parseAmountString(taxRateStr);
-    const netAmtStr = extractFirstXmlTagContent(block, "LineExtensionAmount");
-    const sumNet = parseAmountString(netAmtStr);
-    const sumGross = sumNet !== null && taxRate !== null
-      ? calculateGross(sumNet, taxRate)
-      : null;
-    return { description, taxRate, sumNet, sumGross };
-  });
-
-  if (!invoiceNumber) warnings.push("Invoice number not found in e-invoice XML.");
-  if (!supplier) warnings.push("Supplier name not found in e-invoice XML.");
-  if (!invoiceDate) warnings.push("Invoice date not found in e-invoice XML.");
-
-  return { invoiceNumber, invoiceDate, supplier, currency, positions, totals: { net, gross, tax }, warnings };
-}
-
-export function extractFactsFromPlainText(text: string): Partial<VoucherFactsResult> {
-  const warnings: string[] = [];
-  if (!text || text.trim().length < MIN_MEANINGFUL_TEXT_LENGTH) {
-    warnings.push("Text too short for reliable extraction.");
-    return {
-      invoiceNumber: null,
-      invoiceDate: null,
-      supplier: null,
-      currency: null,
-      positions: [],
-      totals: { net: null, gross: null, tax: null },
-      warnings,
-    };
-  }
-
-  // Invoice number – consolidated alternation pattern covering common German and English labels
-  const invoiceNumberMatch = text.match(
-    /(?:Rechnungsnummer|Rechnungs-?Nr\.|RE-Nr\.|Invoice\s+(?:No|Number|Nr)\.?)[:\s#]*([A-Za-z0-9\-_\/\.]{3,30})|\b(RE-\d[\w\-\/\.]{2,20})\b|\b(INV-\d[\w\-\/\.]{2,20})\b/i
-  );
-  const invoiceNumber = (invoiceNumberMatch?.[1] ?? invoiceNumberMatch?.[2] ?? invoiceNumberMatch?.[3])?.trim() ?? null;
-
-  // Invoice date
-  const dateMatch =
-    text.match(/Rechnungsdatum[:\s]*(\d{1,2}[.\/]\d{1,2}[.\/]\d{4})/i) ??
-    text.match(/Invoice\s+Date[:\s]*(\d{1,2}[.\/]\d{1,2}[.\/]\d{4})/i) ??
-    text.match(/Datum[:\s]*(\d{1,2}\.\d{1,2}\.\d{4})/i) ??
-    text.match(/(\d{4}-\d{2}-\d{2})/);
-  const invoiceDate = parseInvoiceDateString(dateMatch?.[1] ?? null);
-
-  // Currency
-  let currency: string | null = null;
-  if (/\bEUR\b/.test(text) || /\b€/.test(text)) currency = "EUR";
-  else if (/\bUSD\b/.test(text) || /\b\$\d/.test(text)) currency = "USD";
-  else if (/\bGBP\b/.test(text) || /\b£/.test(text)) currency = "GBP";
-  else if (/\bCHF\b/.test(text)) currency = "CHF";
-
-  // Totals - look for gross/net amounts
-  const grossMatch =
-    text.match(/Gesamt(?:betrag)?[:\s]*([0-9.,]+)/i) ??
-    text.match(/Rechnungsbetrag[:\s]*([0-9.,]+)/i) ??
-    text.match(/(?:Total|Brutto)[:\s]*([0-9.,]+)/i) ??
-    text.match(/Summe[:\s]*([0-9.,]+)/i);
-  const gross = parseAmountString(grossMatch?.[1] ?? null);
-
-  const netMatch =
-    text.match(/Nettobetrag[:\s]*([0-9.,]+)/i) ??
-    text.match(/Summe\s+netto[:\s]*([0-9.,]+)/i) ??
-    text.match(/Net(?:to)?(?:\s+amount)?[:\s]*([0-9.,]+)/i);
-  const net = parseAmountString(netMatch?.[1] ?? null);
-
-  const taxMatch =
-    text.match(/Mehrwertsteuer[:\s]*([0-9.,]+)/i) ??
-    text.match(/MwSt\.?[:\s]*([0-9.,]+)/i) ??
-    text.match(/USt\.?[:\s]*([0-9.,]+)/i) ??
-    text.match(/VAT[:\s]*([0-9.,]+)/i) ??
-    text.match(/Tax[:\s]*([0-9.,]+)/i);
-  const tax = parseAmountString(taxMatch?.[1] ?? null);
-
-  // Supplier: look for company patterns in first 10 lines
-  const firstLines = text
-    .split("\n")
-    .map((l) => l.trim())
-    .filter((l) => l.length > 2)
-    .slice(0, 10);
-  const companyPattern = /\b(?:GmbH|AG|KG|OHG|e\.K\.|Inc\.|Ltd\.|S\.A\.|GmbH\s*&\s*Co\.?\s*KG)\b/i;
-  const supplierLine = firstLines.find((l) => companyPattern.test(l)) ?? firstLines[0] ?? null;
-  const supplier = supplierLine ?? null;
-
-  if (!invoiceNumber) warnings.push("Invoice number could not be extracted from text.");
-  if (!invoiceDate) warnings.push("Invoice date could not be extracted from text.");
-  if (gross === null && net === null) warnings.push("Invoice totals could not be extracted from text.");
-
-  return {
-    invoiceNumber,
-    invoiceDate,
-    supplier,
-    currency,
-    positions: [],
-    totals: { net, gross, tax },
-    warnings,
-  };
-}
-
-async function extractVoucherFactsInternal(
-  client: SevdeskClient,
-  voucherId: number
-): Promise<VoucherFactsResult> {
-  const { documentId, bytes, warnings: downloadWarnings } = await downloadDocumentBytesInternal(client, voucherId);
-  const warnings: string[] = [...downloadWarnings];
-
-  // 1. Try e-invoice extraction first
-  let einvoiceResult: EInvoiceCheckResult | null = null;
-  try {
-    einvoiceResult = extractEInvoiceData(bytes);
-  } catch {
-    warnings.push("E-invoice extraction failed; falling back to text extraction.");
-  }
-
-  // 2. Extract text: PDF text layer first, then OCR as fallback for images / scanned PDFs
-  let textResult: { text: string; pages: number; warnings: string[] } | null = null;
-  let usedOcr = false;
-  const docType = detectDocumentType(bytes);
-  if (docType === "pdf") {
-    textResult = await extractPdfTextFromBytes(bytes);
-    warnings.push(...textResult.warnings);
-    // If PDF has no meaningful text layer, attempt OCR on embedded JPEG
-    if (textResult.text.length < MIN_MEANINGFUL_TEXT_LENGTH) {
-      const jpegBytes = extractFirstJpegFromPdf(bytes);
-      if (jpegBytes) {
-        const { text: ocrText, warnings: ocrWarnings } = await performOcrOnImageBuffer(jpegBytes);
-        warnings.push(...ocrWarnings);
-        if (ocrText.length >= MIN_MEANINGFUL_TEXT_LENGTH) {
-          textResult = { text: ocrText, pages: textResult.pages, warnings: ocrWarnings };
-          usedOcr = true;
-        }
-      }
-    }
-  } else if (docType === "image") {
-    const { text: ocrText, warnings: ocrWarnings } = await performOcrOnImageBuffer(bytes);
-    warnings.push(...ocrWarnings);
-    if (ocrText.length >= MIN_MEANINGFUL_TEXT_LENGTH) {
-      textResult = { text: ocrText, pages: 1, warnings: ocrWarnings };
-      usedOcr = true;
-    }
-  }
-
-  // 3. Determine source and extract facts
-  const hasEInvoice = einvoiceResult?.isEinvoice === true && einvoiceResult.data?.xml;
-  const hasText = textResult && textResult.text.length >= MIN_MEANINGFUL_TEXT_LENGTH;
-
-  let source: VoucherFactsSource = "none";
-  let factsFromEInvoice: Partial<VoucherFactsResult> | null = null;
-  let factsFromText: Partial<VoucherFactsResult> | null = null;
-
-  if (hasEInvoice) {
-    const xml = einvoiceResult!.data!.xml;
-    if (einvoiceResult!.format === "ZUGFeRD") {
-      factsFromEInvoice = extractFactsFromZUGFeRD(xml);
-    } else {
-      factsFromEInvoice = extractFactsFromXRechnung(xml);
-    }
-    source = hasText ? "mixed" : "einvoice";
-    if (factsFromEInvoice.warnings) {
-      warnings.push(...factsFromEInvoice.warnings);
-    }
-  }
-
-  if (hasText) {
-    factsFromText = extractFactsFromPlainText(textResult!.text);
-    if (!hasEInvoice) {
-      source = usedOcr ? "ocr" : "pdf-text";
-    }
-    if (factsFromText.warnings) {
-      warnings.push(...factsFromText.warnings);
-    }
-  }
-
-  // 4. Merge facts: e-invoice takes precedence, text fills gaps
-  const merged: Partial<VoucherFactsResult> = factsFromEInvoice ?? factsFromText ?? {};
-  if (factsFromEInvoice && factsFromText) {
-    // Use e-invoice as primary, fill nulls from text
-    merged.supplier = factsFromEInvoice.supplier ?? factsFromText.supplier ?? null;
-    merged.invoiceNumber = factsFromEInvoice.invoiceNumber ?? factsFromText.invoiceNumber ?? null;
-    merged.invoiceDate = factsFromEInvoice.invoiceDate ?? factsFromText.invoiceDate ?? null;
-    merged.currency = factsFromEInvoice.currency ?? factsFromText.currency ?? null;
-    merged.totals = {
-      net: factsFromEInvoice.totals?.net ?? factsFromText.totals?.net ?? null,
-      gross: factsFromEInvoice.totals?.gross ?? factsFromText.totals?.gross ?? null,
-      tax: factsFromEInvoice.totals?.tax ?? factsFromText.totals?.tax ?? null,
-    };
-    merged.positions = (factsFromEInvoice.positions?.length ?? 0) > 0
-      ? factsFromEInvoice.positions!
-      : (factsFromText.positions ?? []);
-  }
-
-  return {
-    voucherId,
-    documentId,
-    source,
-    supplier: merged.supplier ?? null,
-    invoiceNumber: merged.invoiceNumber ?? null,
-    invoiceDate: merged.invoiceDate ?? null,
-    currency: merged.currency ?? null,
-    creditDebitHint: null,
-    positions: merged.positions ?? [],
-    totals: merged.totals ?? { net: null, gross: null, tax: null },
-    warnings: [...new Set(warnings)],
-  };
 }
 
 async function getVoucherBookingContextInternal(
@@ -2757,7 +2195,7 @@ export const voucherTools = {
   get_voucher_document_info: {
     description:
       "Read-only tool that returns document metadata for a single voucher. Returns documentId, fileName, mimeType (of the original document), hasPdf, and hasImagePreview. " +
-      "Useful for PDF-first review workflows where Claude reads the PDF directly while MCP handles sevDesk state and writeback. " +
+      "Useful for PDF-first review workflows where Claude reads the original PDF directly while MCP handles sevDesk state and writeback. " +
       "Returns null for the document field when no document is attached. " +
       "fileName/mimeType are null and hasPdf/hasImagePreview are false when document metadata cannot be retrieved.",
     inputSchema: z.object({
@@ -2800,6 +2238,53 @@ export const voucherTools = {
             }
           })
         );
+      return {
+        ok: results.every((result) => result.ok),
+        results,
+      };
+    },
+  },
+
+  get_voucher_original_pdf: {
+    description:
+      "Read-only tool that returns the original voucher PDF as base64 for Claude/Cowork review. " +
+      "Primary retrieval path is GET /Export/voucherZip with deterministic ZIP entry matching. " +
+      "If voucherZip retrieval fails, /Document/{documentId} is used as explicit fallback with warnings.",
+    inputSchema: z.object({
+      voucherId: z.number().int().positive().describe("The ID of the voucher"),
+    }),
+    handler: async (client: SevdeskClient, params: { voucherId: number }) =>
+      downloadVoucherOriginalPdfInternal(client, params.voucherId),
+  },
+
+  get_voucher_original_pdf_batch: {
+    description:
+      "Read-only batch variant of get_voucher_original_pdf. Returns original PDF payloads for up to 20 vouchers. " +
+      "Per-voucher errors are returned in result items; top-level ok=false when at least one voucher fails.",
+    inputSchema: z.object({
+      voucherIds: z.array(z.number().int().positive()).min(1).max(20),
+    }),
+    handler: async (client: SevdeskClient, params: { voucherIds: number[] }) => {
+      const results: Array<VoucherBatchResult<VoucherOriginalPdfResult>> = await Promise.all(
+        params.voucherIds.map(async (voucherId) => {
+          try {
+            const data = await downloadVoucherOriginalPdfInternal(client, voucherId);
+            return { voucherId, ok: true, data, errors: [], warnings: [] };
+          } catch (error) {
+            return {
+              voucherId,
+              ok: false,
+              errors: [
+                createIssue(
+                  "DOCUMENT_DOWNLOAD_FAILED",
+                  `Original voucher PDF could not be loaded: ${getErrorMessage(error)}`
+                ),
+              ],
+              warnings: [],
+            };
+          }
+        })
+      );
       return {
         ok: results.every((result) => result.ok),
         results,
@@ -2983,105 +2468,4 @@ export const voucherTools = {
     ) => applyVoucherBookingPlanInternal(client, params),
   },
 
-  extract_voucher_document_text: {
-    description:
-      "Read-only tool that downloads a voucher document server-side and returns the extracted text. " +
-      "Primary source is /Document/{documentId}; if that fails, Export/voucherZip is used as a server-side fallback. " +
-      "For PDFs with a text layer (e.g. searchable scanner PDFs or digital invoices), text is extracted directly. " +
-      "For JPEG/PNG/TIFF image documents and scanned PDFs without a text layer, OCR is performed server-side using " +
-      "tesseract.js (WASM). Returns source='ocr' when OCR succeeds, source='none' with a warning when it fails. " +
-      "Use this tool so Claude can work from compact extracted text instead of raw image/base64 payloads.",
-    inputSchema: z.object({
-      voucherId: z.number().int().positive().describe("The ID of the voucher"),
-    }),
-    handler: async (client: SevdeskClient, params: { voucherId: number }) =>
-      extractDocumentTextInternal(client, params.voucherId),
-  },
-
-  extract_voucher_document_text_batch: {
-    description:
-      "Read-only batch variant of extract_voucher_document_text. Extracts document text for up to 20 vouchers. " +
-      "Per-voucher failures are reported per result with ok:false; the top-level ok is false if any voucher hard-failed.",
-    inputSchema: z.object({
-      voucherIds: z.array(z.number().int().positive()).min(1).max(20),
-    }),
-    handler: async (client: SevdeskClient, params: { voucherIds: number[] }) => {
-      const results: Array<VoucherBatchResult<DocumentTextResult>> = await Promise.all(
-        params.voucherIds.map(async (voucherId) => {
-          try {
-            const data = await extractDocumentTextInternal(client, voucherId);
-            return { voucherId, ok: true, data, errors: [], warnings: [] };
-          } catch (error) {
-            return {
-              voucherId,
-              ok: false,
-              errors: [
-                createIssue(
-                  "DOCUMENT_TEXT_EXTRACTION_FAILED",
-                  `Document text extraction failed: ${getErrorMessage(error)}`
-                ),
-              ],
-              warnings: [],
-            };
-          }
-        })
-      );
-      return {
-        ok: results.every((r) => r.ok),
-        results,
-      };
-    },
-  },
-
-  extract_voucher_facts: {
-    description:
-      "Read-only tool that extracts structured voucher facts from the attached document. " +
-      "Primary source is /Document/{documentId}; if that fails, Export/voucherZip is used as a server-side fallback. " +
-      "Prefers ZUGFeRD/XRechnung e-invoice data when available (source: 'einvoice' or 'mixed'). " +
-      "Falls back to PDF text extraction with heuristic parsing (source: 'pdf-text'). " +
-      "For image documents (JPEG/PNG/TIFF) and scanned PDFs without a text layer, OCR is performed server-side " +
-      "and heuristics are applied to the OCR output (source: 'ocr'). " +
-      "Returns null for fields that cannot be determined reliably, with explanatory warnings. " +
-      "Useful for pre-populating a voucher booking plan before calling validate_voucher_booking_plan.",
-    inputSchema: z.object({
-      voucherId: z.number().int().positive().describe("The ID of the voucher"),
-    }),
-    handler: async (client: SevdeskClient, params: { voucherId: number }) =>
-      extractVoucherFactsInternal(client, params.voucherId),
-  },
-
-  extract_voucher_facts_batch: {
-    description:
-      "Read-only batch variant of extract_voucher_facts. Extracts structured facts for up to 20 vouchers. " +
-      "Per-voucher failures are reported per result with ok:false; the top-level ok is false if any voucher hard-failed.",
-    inputSchema: z.object({
-      voucherIds: z.array(z.number().int().positive()).min(1).max(20),
-    }),
-    handler: async (client: SevdeskClient, params: { voucherIds: number[] }) => {
-      const results: Array<VoucherBatchResult<VoucherFactsResult>> = await Promise.all(
-        params.voucherIds.map(async (voucherId) => {
-          try {
-            const data = await extractVoucherFactsInternal(client, voucherId);
-            return { voucherId, ok: true, data, errors: [], warnings: [] };
-          } catch (error) {
-            return {
-              voucherId,
-              ok: false,
-              errors: [
-                createIssue(
-                  "DOCUMENT_TEXT_EXTRACTION_FAILED",
-                  `Voucher fact extraction failed: ${getErrorMessage(error)}`
-                ),
-              ],
-              warnings: [],
-            };
-          }
-        })
-      );
-      return {
-        ok: results.every((r) => r.ok),
-        results,
-      };
-    },
-  },
 };
