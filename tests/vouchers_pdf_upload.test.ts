@@ -109,14 +109,17 @@ describe("create_voucher_from_pdf", () => {
       }
     );
 
-    expect(result).toEqual({
-      ok: false,
-      voucherId: null,
-      documentId: null,
-      fileName: "receipt.pdf",
-      warnings: [expect.stringContaining("voucherDate was not provided")],
-      errors: [expect.objectContaining({ code: "PDF_UPLOAD_FAILED" })],
-    });
+    expect(result.ok).toBe(false);
+    expect(result.voucherId).toBeNull();
+    expect(result.documentId).toBeNull();
+    expect(result.fileName).toBe("receipt.pdf");
+    expect(result.warnings).toEqual(
+      expect.arrayContaining([
+        expect.stringContaining("voucherDate was not provided"),
+        expect.stringContaining("creditDebit was not provided"),
+      ])
+    );
+    expect(result.errors).toEqual([expect.objectContaining({ code: "PDF_UPLOAD_FAILED" })]);
   });
 
   it("returns structured failure when saveVoucher fails after upload", async () => {

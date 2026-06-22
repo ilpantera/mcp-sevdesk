@@ -1950,13 +1950,17 @@ export const voucherTools = {
       if (!params.voucherDate) {
         warnings.push("voucherDate was not provided. Defaulted to current date.");
       }
+      const creditDebit = params.creditDebit ?? "D";
+      if (!params.creditDebit) {
+        warnings.push("creditDebit was not provided. Defaulted to D (debit expense voucher).");
+      }
 
       const { data: uploadData, error: uploadError } = await client.POST("/Voucher/Factory/uploadTempFile", {
         body: {
           content: normalizedBase64,
           filename: trimmedFileName,
           base64: true,
-          creditDebit: params.creditDebit ?? "D",
+          creditDebit,
         } as any,
       });
       if (uploadError) {
@@ -1992,7 +1996,7 @@ export const voucherTools = {
         mapAll: true,
         voucherDate,
         status: 50,
-        creditDebit: params.creditDebit ?? "D",
+        creditDebit,
         voucherType: "VOU",
       };
       if (params.description) voucherBody.description = params.description;
