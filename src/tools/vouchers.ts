@@ -758,18 +758,27 @@ export function decodeAndUnpackVoucherZipPayload(exportData: unknown): { entries
     throw new Error("Export/voucherZip did not return a base64 content payload");
   }
 
-  let zipBytes: Buffer;
-  try {
-    zipBytes = Buffer.from(content, "base64");
-  } catch {
+  const base64Content = content.trim();
+  if (!/^[A-Za-z0-9+/=\r\n]+$/.test(base64Content)) {
     throw new Error("Export/voucherZip content is not valid base64");
   }
 
+  let zipBytes: Buffer;
+  zipBytes = Buffer.from(base64Content, "base64");
   if (zipBytes.length === 0) {
-    throw new Error("Export/voucherZip returned an empty ZIP payload");
+    throw new Error("Export/voucherZip content is not valid base64");
   }
 
   const entries: VoucherZipEntry[] = [];
+  const findNextZipEntryOrFooterOffset = (startOffset: number): number | null => {
+    for (let cursor = startOffset; cursor + 4 <= zipBytes.length; cursor++) {
+      const marker = zipBytes.readUInt32LE(cursor);
+      if (marker === 0x04034b50 || marker === 0x02014b50 || marker === 0x06054b50) {
+        return cursor;
+      }
+    }
+    return null;
+  };
   let offset = 0;
   while (offset + 4 <= zipBytes.length) {
     const signature = zipBytes.readUInt32LE(offset);
@@ -777,7 +786,9 @@ export function decodeAndUnpackVoucherZipPayload(exportData: unknown): { entries
       break;
     }
     if (signature !== 0x04034b50) {
-      warnings.push(`Unexpected ZIP signature 0x${signature.toString(16)} at offset ${offset}; stopping parse.`);
+      warnings.push(
+        `Unexpected ZIP signature 0x${signature.toString(16)} at offset ${offset}; payload may be truncated or malformed.`
+      );
       break;
     }
     if (offset + 30 > zipBytes.length) {
@@ -791,11 +802,6 @@ export function decodeAndUnpackVoucherZipPayload(exportData: unknown): { entries
     const fileNameLength = zipBytes.readUInt16LE(offset + 26);
     const extraLength = zipBytes.readUInt16LE(offset + 28);
 
-    if ((generalPurposeFlag & 0x08) !== 0) {
-      warnings.push("ZIP entry uses data descriptor; entry skipped because deterministic parsing is not possible.");
-      break;
-    }
-
     const fileNameStart = offset + 30;
     const fileNameEnd = fileNameStart + fileNameLength;
     const dataStart = fileNameEnd + extraLength;
@@ -803,6 +809,16 @@ export function decodeAndUnpackVoucherZipPayload(exportData: unknown): { entries
     if (dataEnd > zipBytes.length) {
       warnings.push("Truncated ZIP entry payload encountered.");
       break;
+    }
+
+    if ((generalPurposeFlag & 0x08) !== 0) {
+      warnings.push("ZIP entry uses data descriptor; entry skipped because deterministic parsing is not possible.");
+      const nextOffset = findNextZipEntryOrFooterOffset(dataStart);
+      if (nextOffset === null) {
+        break;
+      }
+      offset = nextOffset;
+      continue;
     }
 
     const fileName = zipBytes.toString("utf8", fileNameStart, fileNameEnd);
@@ -845,6 +861,7 @@ export function pickVoucherZipEntryForDocument(
   const warnings: string[] = [];
   const fileName = documentFileName?.trim() ?? "";
   const lowerFileName = fileName.toLowerCase();
+  const documentIdText = String(documentId).toLowerCase();
 
   if (lowerFileName.length > 0) {
     const exactPathMatches = entries.filter((entry) => entry.fileName.toLowerCase() === lowerFileName);
@@ -875,7 +892,14 @@ export function pickVoucherZipEntryForDocument(
 
   const idTokenMatches = entries.filter((entry) => {
     const baseName = entry.fileName.split("/").pop()?.toLowerCase() ?? "";
-    return new RegExp(`(?:^|[^0-9])${documentId}(?:[^0-9]|$)`).test(baseName);
+    const matchIndex = baseName.indexOf(documentIdText);
+    if (matchIndex < 0) return false;
+    const before = matchIndex === 0 ? "" : baseName[matchIndex - 1];
+    const afterIndex = matchIndex + documentIdText.length;
+    const after = afterIndex >= baseName.length ? "" : baseName[afterIndex];
+    const beforeIsDigit = before >= "0" && before <= "9";
+    const afterIsDigit = after >= "0" && after <= "9";
+    return !beforeIsDigit && !afterIsDigit;
   });
   if (idTokenMatches.length === 1) {
     warnings.push("Matched ZIP entry by documentId token because exact filename was unavailable.");
@@ -898,34 +922,47 @@ async function downloadDocumentBytesViaVoucherZipInternal(
   documentId: number
 ): Promise<{ bytes: Buffer; warnings: string[] }> {
   const documentInfo = await getVoucherDocumentInfoInternal(client, voucherId);
-  const { data: exportData, error: exportError } = await callUntypedClientMethod(client, "GET", "/Export/voucherZip", {
-    params: {
-      query: {
-        download: false,
-        sevQuery: {
-          modelName: "Voucher",
-          objectName: "SevQuery",
-          limit: 1,
-          filter: { id: voucherId } as Record<string, unknown>,
+  const filterCandidates: Record<string, unknown>[] = [{ id: voucherId }, { id: { "$eq": voucherId } }];
+  const attemptErrors: string[] = [];
+
+  for (const filterCandidate of filterCandidates) {
+    const { data: exportData, error: exportError } = await callUntypedClientMethod(client, "GET", "/Export/voucherZip", {
+      params: {
+        query: {
+          download: false,
+          sevQuery: {
+            modelName: "Voucher",
+            objectName: "SevQuery",
+            limit: 1,
+            filter: filterCandidate,
+          },
         },
       },
-    },
-  });
-  if (exportError) {
-    throw new Error(`Export/voucherZip request failed: ${JSON.stringify(exportError)}`);
+    });
+    if (exportError) {
+      attemptErrors.push(
+        `Export/voucherZip request failed for filter ${JSON.stringify(filterCandidate)}: ${JSON.stringify(exportError)}`
+      );
+      continue;
+    }
+
+    const { entries, warnings } = decodeAndUnpackVoucherZipPayload(exportData);
+    const picked = pickVoucherZipEntryForDocument(entries, documentId, documentInfo?.fileName ?? null);
+    const combinedWarnings = [...warnings, ...picked.warnings];
+    if (!picked.entry) {
+      attemptErrors.push(
+        `Export/voucherZip mapping failed for filter ${JSON.stringify(filterCandidate)}: ${combinedWarnings.join("; ")}`
+      );
+      continue;
+    }
+
+    return {
+      bytes: picked.entry.bytes,
+      warnings: [...combinedWarnings, `Document loaded via Export/voucherZip fallback from "${picked.entry.fileName}".`],
+    };
   }
 
-  const { entries, warnings } = decodeAndUnpackVoucherZipPayload(exportData);
-  const picked = pickVoucherZipEntryForDocument(entries, documentId, documentInfo?.fileName ?? null);
-  const combinedWarnings = [...warnings, ...picked.warnings];
-  if (!picked.entry) {
-    throw new Error(combinedWarnings.join(" "));
-  }
-
-  return {
-    bytes: picked.entry.bytes,
-    warnings: [...combinedWarnings, `Document loaded via Export/voucherZip fallback from "${picked.entry.fileName}".`],
-  };
+  throw new Error(attemptErrors.join("; "));
 }
 
 async function downloadDocumentBytesInternal(

@@ -42,7 +42,13 @@ function toArrayBuffer(buf: Buffer): ArrayBuffer {
   return buf.buffer.slice(buf.byteOffset, buf.byteOffset + buf.byteLength) as ArrayBuffer;
 }
 
-function makeStoredZip(entries: Array<{ fileName: string; bytes: Buffer }>): Buffer {
+/**
+ * Minimal ZIP builder for unit tests:
+ * - creates only local file headers (no central directory)
+ * - uses STORE compression (method 0) only
+ * This is sufficient for testing the local-header parser used by voucherZip fallback logic.
+ */
+function makeZipWithStoreCompression(entries: Array<{ fileName: string; bytes: Buffer }>): Buffer {
   return Buffer.concat(
     entries.map(({ fileName, bytes }) => {
       const nameBytes = Buffer.from(fileName, "utf8");
@@ -162,7 +168,7 @@ describe("extract_voucher_document_text", () => {
 
   it("falls back to Export/voucherZip when direct document download fails", async () => {
     const pdfBytes = loadRealPdfWithText();
-    const zipBytes = makeStoredZip([{ fileName: "exports/a1b2c3d4e5.pdf", bytes: pdfBytes }]);
+    const zipBytes = makeZipWithStoreCompression([{ fileName: "exports/a1b2c3d4e5.pdf", bytes: pdfBytes }]);
     const GET = vi.fn().mockImplementation((path: string) => {
       if (path === "/Voucher/{voucherId}") {
         return Promise.resolve({
@@ -174,6 +180,7 @@ describe("extract_voucher_document_text", () => {
         return Promise.resolve({ data: undefined, error: { message: "forbidden" } });
       }
       if (path === "/Voucher/{voucherId}/getDocumentImage") {
+        // sevDesk preview mimeType can be image/* while originMimeType stays the uploaded PDF type.
         return Promise.resolve({
           data: { objects: { filename: "a1b2c3d4e5.pdf", originMimeType: "application/pdf", mimeType: "image/jpeg" } },
           error: undefined,
@@ -202,7 +209,75 @@ describe("extract_voucher_document_text", () => {
 
     expect(result.source).toBe("pdf-text");
     expect(result.text.length).toBeGreaterThan(20);
-    expect(result.warnings.some((warning) => warning.includes("Export/voucherZip fallback"))).toBe(true);
+    expect(result.warnings.some((warning) => warning.includes("Document loaded via Export/voucherZip fallback"))).toBe(
+      true
+    );
+  });
+
+  it("throws when Export/voucherZip request fails during fallback", async () => {
+    const GET = vi.fn().mockImplementation((path: string) => {
+      if (path === "/Voucher/{voucherId}") {
+        return Promise.resolve({
+          data: { objects: [{ id: 1, document: { id: 42, objectName: "Document" } }] },
+          error: undefined,
+        });
+      }
+      if (path === "/Document/{documentId}") {
+        return Promise.resolve({ data: undefined, error: { message: "forbidden" } });
+      }
+      if (path === "/Voucher/{voucherId}/getDocumentImage") {
+        return Promise.resolve({
+          data: { objects: { filename: "a1b2c3d4e5.pdf", originMimeType: "application/pdf", mimeType: "image/jpeg" } },
+          error: undefined,
+        });
+      }
+      if (path === "/Export/voucherZip") {
+        return Promise.resolve({ data: undefined, error: { message: "export failed" } });
+      }
+      return Promise.resolve({ data: undefined, error: "unexpected call" });
+    });
+
+    await expect(
+      voucherTools.extract_voucher_document_text.handler(
+        { GET } as unknown as SevdeskClient,
+        { voucherId: 1 }
+      )
+    ).rejects.toThrow(/Export\/voucherZip request failed/i);
+  });
+
+  it("throws when voucherZip fallback cannot map a file deterministically", async () => {
+    const zipBytes = makeZipWithStoreCompression([{ fileName: "exports/not-matching.pdf", bytes: Buffer.from("dummy") }]);
+    const GET = vi.fn().mockImplementation((path: string) => {
+      if (path === "/Voucher/{voucherId}") {
+        return Promise.resolve({
+          data: { objects: [{ id: 1, document: { id: 42, objectName: "Document" } }] },
+          error: undefined,
+        });
+      }
+      if (path === "/Document/{documentId}") {
+        return Promise.resolve({ data: undefined, error: { message: "forbidden" } });
+      }
+      if (path === "/Voucher/{voucherId}/getDocumentImage") {
+        return Promise.resolve({
+          data: { objects: { filename: "a1b2c3d4e5.pdf", originMimeType: "application/pdf", mimeType: "image/jpeg" } },
+          error: undefined,
+        });
+      }
+      if (path === "/Export/voucherZip") {
+        return Promise.resolve({
+          data: { objects: { content: zipBytes.toString("base64"), base64Encoded: true } },
+          error: undefined,
+        });
+      }
+      return Promise.resolve({ data: undefined, error: "unexpected call" });
+    });
+
+    await expect(
+      voucherTools.extract_voucher_document_text.handler(
+        { GET } as unknown as SevdeskClient,
+        { voucherId: 1 }
+      )
+    ).rejects.toThrow(/No ZIP entry matched voucher document filename/i);
   });
 });
 
@@ -454,7 +529,7 @@ describe("extract_voucher_facts_batch", () => {
 
   describe("voucherZip helpers", () => {
     it("decodes and unpacks base64 ZIP content", () => {
-      const zipBytes = makeStoredZip([
+      const zipBytes = makeZipWithStoreCompression([
         { fileName: "one.pdf", bytes: Buffer.from("%PDF-1.4\n%%EOF", "utf8") },
         { fileName: "two.txt", bytes: Buffer.from("hello", "utf8") },
       ]);
@@ -476,6 +551,18 @@ describe("extract_voucher_facts_batch", () => {
 
       expect(result.entry).toBeNull();
       expect(result.warnings[0]).toMatch(/Multiple ZIP entries matched basename/i);
+    });
+
+    it("throws for missing ZIP base64 content", () => {
+      expect(() => decodeAndUnpackVoucherZipPayload({ objects: { content: "   " } })).toThrow(
+        /did not return a base64 content payload/i
+      );
+    });
+
+    it("throws for invalid ZIP base64 content", () => {
+      expect(() => decodeAndUnpackVoucherZipPayload({ objects: { content: "***not-base64***" } })).toThrow(
+        /not valid base64/i
+      );
     });
   });
 });
