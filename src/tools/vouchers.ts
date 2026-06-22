@@ -1043,6 +1043,74 @@ async function extractPdfTextFromBytes(bytes: Buffer): Promise<{ text: string; p
   }
 }
 
+/**
+ * Perform OCR on an image buffer using tesseract.js (WASM-based, no system deps).
+ * Languages: English + German (covers most EU invoices).
+ * Language data is downloaded from the tesseract.js CDN on first use and cached
+ * in the system temp directory – first run may take a few seconds.
+ * Returns { text, warnings } and never throws.
+ */
+async function performOcrOnImageBuffer(imageBuffer: Buffer): Promise<{ text: string; warnings: string[] }> {
+  try {
+    const { createWorker } = await import("tesseract.js");
+    const worker = await createWorker(["eng", "deu"], undefined, { errorHandler: () => undefined });
+    try {
+      const { data } = await worker.recognize(imageBuffer);
+      const text = (data.text ?? "").trim();
+      const warnings: string[] = [];
+      if (text.length < MIN_MEANINGFUL_TEXT_LENGTH) {
+        warnings.push(
+          "OCR produced no usable text. The document may be low-quality, rotated, or contain no recognizable text."
+        );
+      }
+      return { text, warnings };
+    } finally {
+      await worker.terminate();
+    }
+  } catch (err) {
+    return { text: "", warnings: [`OCR failed: ${getErrorMessage(err)}`] };
+  }
+}
+
+/**
+ * Heuristic: search the raw PDF byte stream for embedded JPEG data (DCTDecode /
+ * JFIF / EXIF SOI marker FF D8 FF).  Most phone-scanner and office-scanner PDFs
+ * embed the scanned page as a single JPEG object – this extractor finds the first
+ * such image and returns its raw bytes so they can be passed to OCR.
+ *
+ * Limitations:
+ * - Only finds JPEG images, not PNG or CCITT/G4 compressed pages.
+ * - Returns only the first JPEG found (single-page scans are the common case).
+ * - Not reliable for multi-stream or heavily compressed PDFs.
+ */
+function extractFirstJpegFromPdf(pdfBytes: Buffer): Buffer | null {
+  const SOI_0 = 0xff;
+  const SOI_1 = 0xd8;
+  // Minimum: SOI (2 bytes) + at least one segment + EOI (2 bytes)
+  if (pdfBytes.length < 6) return null;
+
+  let soiIndex = -1;
+  for (let i = 0; i <= pdfBytes.length - 3; i++) {
+    if (pdfBytes[i] === SOI_0 && pdfBytes[i + 1] === SOI_1 && pdfBytes[i + 2] === SOI_0) {
+      soiIndex = i;
+      break;
+    }
+  }
+  if (soiIndex === -1) return null;
+
+  // Search for EOI (FF D9) scanning backwards from end for the outermost JPEG
+  for (let i = pdfBytes.length - 2; i > soiIndex + 4; i--) {
+    if (pdfBytes[i] === 0xff && pdfBytes[i + 1] === 0xd9) {
+      const candidate = pdfBytes.subarray(soiIndex, i + 2);
+      // Sanity-check: the extracted slice must start with FF D8 FF and end with FF D9
+      if (candidate.length >= 6) {
+        return candidate;
+      }
+    }
+  }
+  return null;
+}
+
 async function extractDocumentTextInternal(
   client: SevdeskClient,
   voucherId: number
@@ -1051,18 +1119,74 @@ async function extractDocumentTextInternal(
   const docType = detectDocumentType(bytes);
 
   if (docType === "pdf") {
-    const { text, pages, warnings } = await extractPdfTextFromBytes(bytes);
+    const { text, pages, warnings: textWarnings } = await extractPdfTextFromBytes(bytes);
+    if (text.length >= MIN_MEANINGFUL_TEXT_LENGTH) {
+      return {
+        voucherId,
+        documentId,
+        source: "pdf-text",
+        pages,
+        text,
+        warnings: [...downloadWarnings, ...textWarnings],
+      };
+    }
+
+    // PDF has no meaningful text layer – attempt OCR on embedded JPEG image
+    const jpegBytes = extractFirstJpegFromPdf(bytes);
+    if (jpegBytes) {
+      const { text: ocrText, warnings: ocrWarnings } = await performOcrOnImageBuffer(jpegBytes);
+      if (ocrText.length >= MIN_MEANINGFUL_TEXT_LENGTH) {
+        return {
+          voucherId,
+          documentId,
+          source: "ocr",
+          pages,
+          text: ocrText,
+          warnings: [...downloadWarnings, ...textWarnings, ...ocrWarnings],
+        };
+      }
+      return {
+        voucherId,
+        documentId,
+        source: "none",
+        pages,
+        text: "",
+        warnings: [
+          ...downloadWarnings,
+          ...textWarnings,
+          ...ocrWarnings,
+          "Scanned PDF: no embedded JPEG yielded usable OCR text.",
+        ],
+      };
+    }
+
+    // No embedded JPEG found; cannot do OCR on this PDF
     return {
       voucherId,
       documentId,
-      source: text.length >= MIN_MEANINGFUL_TEXT_LENGTH ? "pdf-text" : "none",
+      source: "none",
       pages,
-      text,
-      warnings: [...downloadWarnings, ...warnings],
+      text: "",
+      warnings: [
+        ...downloadWarnings,
+        ...textWarnings,
+        "Scanned PDF has no extractable text layer and no embedded JPEG for OCR.",
+      ],
     };
   }
 
   if (docType === "image") {
+    const { text: ocrText, warnings: ocrWarnings } = await performOcrOnImageBuffer(bytes);
+    if (ocrText.length >= MIN_MEANINGFUL_TEXT_LENGTH) {
+      return {
+        voucherId,
+        documentId,
+        source: "ocr",
+        pages: 1,
+        text: ocrText,
+        warnings: [...downloadWarnings, ...ocrWarnings],
+      };
+    }
     return {
       voucherId,
       documentId,
@@ -1071,8 +1195,8 @@ async function extractDocumentTextInternal(
       text: "",
       warnings: [
         ...downloadWarnings,
-        "Document is an image file. OCR is not performed server-side. " +
-          "Use direct document review in Claude for image-based vouchers.",
+        ...ocrWarnings,
+        "Image document: OCR produced no usable text. The image may be low-quality or unsupported.",
       ],
     };
   }
@@ -1342,17 +1466,32 @@ async function extractVoucherFactsInternal(
     warnings.push("E-invoice extraction failed; falling back to text extraction.");
   }
 
-  // 2. Extract PDF text
+  // 2. Extract text: PDF text layer first, then OCR as fallback for images / scanned PDFs
   let textResult: { text: string; pages: number; warnings: string[] } | null = null;
+  let usedOcr = false;
   const docType = detectDocumentType(bytes);
   if (docType === "pdf") {
     textResult = await extractPdfTextFromBytes(bytes);
     warnings.push(...textResult.warnings);
+    // If PDF has no meaningful text layer, attempt OCR on embedded JPEG
+    if (textResult.text.length < MIN_MEANINGFUL_TEXT_LENGTH) {
+      const jpegBytes = extractFirstJpegFromPdf(bytes);
+      if (jpegBytes) {
+        const { text: ocrText, warnings: ocrWarnings } = await performOcrOnImageBuffer(jpegBytes);
+        warnings.push(...ocrWarnings);
+        if (ocrText.length >= MIN_MEANINGFUL_TEXT_LENGTH) {
+          textResult = { text: ocrText, pages: textResult.pages, warnings: ocrWarnings };
+          usedOcr = true;
+        }
+      }
+    }
   } else if (docType === "image") {
-    warnings.push(
-      "Document is an image file. OCR is not performed server-side. " +
-        "Use direct document review in Claude for image-based vouchers."
-    );
+    const { text: ocrText, warnings: ocrWarnings } = await performOcrOnImageBuffer(bytes);
+    warnings.push(...ocrWarnings);
+    if (ocrText.length >= MIN_MEANINGFUL_TEXT_LENGTH) {
+      textResult = { text: ocrText, pages: 1, warnings: ocrWarnings };
+      usedOcr = true;
+    }
   }
 
   // 3. Determine source and extract facts
@@ -1379,7 +1518,7 @@ async function extractVoucherFactsInternal(
   if (hasText) {
     factsFromText = extractFactsFromPlainText(textResult!.text);
     if (!hasEInvoice) {
-      source = "pdf-text";
+      source = usedOcr ? "ocr" : "pdf-text";
     }
     if (factsFromText.warnings) {
       warnings.push(...factsFromText.warnings);
@@ -2846,7 +2985,8 @@ export const voucherTools = {
       "Read-only tool that downloads a voucher document server-side and returns the extracted text. " +
       "Primary source is /Document/{documentId}; if that fails, Export/voucherZip is used as a server-side fallback. " +
       "For PDFs with a text layer (e.g. searchable scanner PDFs or digital invoices), text is extracted directly. " +
-      "For image-only PDFs or JPEG/PNG documents, a warning is returned and text will be empty. " +
+      "For JPEG/PNG/TIFF image documents and scanned PDFs without a text layer, OCR is performed server-side using " +
+      "tesseract.js (WASM). Returns source='ocr' when OCR succeeds, source='none' with a warning when it fails. " +
       "Use this tool so Claude can work from compact extracted text instead of raw image/base64 payloads.",
     inputSchema: z.object({
       voucherId: z.number().int().positive().describe("The ID of the voucher"),
@@ -2896,6 +3036,8 @@ export const voucherTools = {
       "Primary source is /Document/{documentId}; if that fails, Export/voucherZip is used as a server-side fallback. " +
       "Prefers ZUGFeRD/XRechnung e-invoice data when available (source: 'einvoice' or 'mixed'). " +
       "Falls back to PDF text extraction with heuristic parsing (source: 'pdf-text'). " +
+      "For image documents (JPEG/PNG/TIFF) and scanned PDFs without a text layer, OCR is performed server-side " +
+      "and heuristics are applied to the OCR output (source: 'ocr'). " +
       "Returns null for fields that cannot be determined reliably, with explanatory warnings. " +
       "Useful for pre-populating a voucher booking plan before calling validate_voucher_booking_plan.",
     inputSchema: z.object({

@@ -73,9 +73,9 @@ SEVDESK_API_TOKEN="dein-token" npm start
 | `get_voucher_booking_context_batch` | read | Strukturierte Batch-Variante des Booking Context |
 | `get_voucher_document_info` | read | Dokument-Metadaten eines Belegs (documentId, Dateiname, MIME-Typ, hasPdf, hasImagePreview) |
 | `get_voucher_document_info_batch` | read | Batch-Variante von `get_voucher_document_info` für bis zu 50 Belege |
-| `extract_voucher_document_text` | read | Lädt das Belegdokument serverseitig herunter und extrahiert den Text (PDF-Textlayer-first) |
+| `extract_voucher_document_text` | read | Lädt das Belegdokument serverseitig herunter und extrahiert den Text (PDF-Textlayer-first, mit OCR-Fallback für Bilder/gescannte PDFs) |
 | `extract_voucher_document_text_batch` | read | Batch-Variante von `extract_voucher_document_text` für bis zu 20 Belege |
-| `extract_voucher_facts` | read | Extrahiert strukturierte Belegdaten (Lieferant, Rechnungsnummer, Betrag, …) – E-Invoice-first, dann Text-Heuristiken |
+| `extract_voucher_facts` | read | Extrahiert strukturierte Belegdaten (Lieferant, Rechnungsnummer, Betrag, …) – E-Invoice-first, dann Text-Heuristiken, dann OCR |
 | `extract_voucher_facts_batch` | read | Batch-Variante von `extract_voucher_facts` für bis zu 20 Belege |
 | `validate_voucher_booking_plan` | read | Strikte lokale Validierung eines Voucher-Buchungsplans, optional mit Receipt Guidance |
 | `apply_voucher_booking_plan` | write | Empfohlenes High-Level-Tool für konsistente Voucher-Buchung |
@@ -124,7 +124,7 @@ Diese Bereiche bleiben bewusst **low-level**. Für Update 2.0 werden Statuswechs
 - Tags
 - Reports
 
-## Serverseitige Dokumentenextraktion
+## Serverseitige Dokumentenextraktion (inkl. OCR)
 
 `extract_voucher_document_text` und `extract_voucher_facts` laden Belegdokumente **serverseitig** herunter und geben kompakten Text bzw. strukturierte Daten zurück – Claude arbeitet damit statt mit rohen PDF-/Base64-Payloads.
 
@@ -136,8 +136,8 @@ Primär wird `/Document/{documentId}` verwendet. Falls dieser Download fehlschl�
 2. Strukturierte Fakten extrahieren: `extract_voucher_facts_batch(voucherIds)`
    - Liefert Lieferant, Rechnungsnummer, Datum, Währung, Beträge
    - Bevorzugt E-Invoice-Daten (ZUGFeRD/XRechnung) wenn vorhanden
-   - Fällt auf PDF-Textextraktion mit Regex-Heuristiken zurück
-3. Für fehlende Felder: `extract_voucher_document_text(voucherId)` → Claude wertet den Rohtext aus
+   - Fällt auf PDF-Textextraktion zurück, dann bei Bedarf auf OCR
+3. Nur bei fehlenden Feldern oder `source: "none"`: `extract_voucher_document_text(voucherId)` → Claude wertet den Rohtext aus
 4. Buchungsplan erstellen und validieren: `validate_voucher_booking_plan`
 5. Plan schreiben: `apply_voucher_booking_plan`
 
@@ -168,7 +168,8 @@ Mögliche Werte für `source`:
 | `einvoice` | Alle Felder aus ZUGFeRD/XRechnung-XML |
 | `mixed` | E-Invoice + PDF-Text zusammengeführt |
 | `pdf-text` | Nur PDF-Textlayer + Regex-Heuristiken |
-| `none` | Kein Text extrahierbar (z. B. reines Bilddokument) |
+| `ocr` | Serverseitige OCR (tesseract.js/WASM) auf Bilddokument oder gescanntem PDF |
+| `none` | Kein Text extrahierbar; alle Felder sind `null` |
 
 ### Rückgabeformat `extract_voucher_document_text`
 
@@ -176,18 +177,37 @@ Mögliche Werte für `source`:
 {
   "voucherId": 147848515,
   "documentId": 123456,
-  "source": "pdf-text",
-  "pages": 2,
+  "source": "ocr",
+  "pages": 1,
   "text": "Lieferant GmbH\nRechnungsnummer: RE-2024-001\n...",
   "warnings": []
 }
 ```
 
+### Serverseitige OCR
+
+Für JPEG-, PNG- und TIFF-Dokumente sowie für gescannte PDFs ohne Textlayer führt der MCP **automatisch OCR serverseitig durch** (tesseract.js, WASM-basiert, keine Systemabhängigkeit).
+
+- **Beim ersten Aufruf** werden Sprachmodell-Daten (Englisch + Deutsch) heruntergeladen und lokal gecacht. Dieser Vorgang kann beim ersten Start einige Sekunden dauern.
+- Bei erfolgreicher OCR: `source: "ocr"`, Feld `text` enthält den erkannten Text.
+- Bei fehlgeschlagener OCR: `source: "none"`, Feld `warnings` enthält einen erklärenden Hinweis.
+
+**OCR-Einschränkungen und Hinweise:**
+
+| Aspekt | Details |
+|---|---|
+| Sprachen | Englisch + Deutsch (Standard). Weitere Sprachen erfordern Anpassung der Konfiguration. |
+| Bildqualität | OCR liefert zuverlässige Ergebnisse bei Auflösung ≥ 150 dpi. Sehr niedrige Auflösung oder starke Artefakte können Erkennungsqualität reduzieren. |
+| Gescannte PDFs | OCR wird auf eingebettete JPEG-Bilder im PDF angewendet. PDFs mit anderen Bildformaten (CCITT/G4, PNG-Streams) werden ggf. nicht erkannt. |
+| Mehrseiter | Bei mehrseitigen gescannten PDFs wird nur die erste eingebettete JPEG-Seite verarbeitet. |
+| Erstlauf-Latenz | ~5–15 s beim ersten Start (WASM-Initialisierung + Sprachmodell-Download). Folgeaufrufe sind deutlich schneller. |
+| Keine Halluzination | Der MCP erfindet keine Felder. Wenn OCR-Text keine sicheren Werte liefert, bleiben Felder `null` mit Warnung. |
+
 ### Hinweise und Einschränkungen
 
-- **Durchsuchbare PDFs** (mit Textlayer, z. B. von modernen Scannern oder digitalen Rechnungen): vollständige Textextraktion.
-- **Bildbasierte PDFs** (gescannte Seiten ohne Textlayer): `source: "none"`, Warnung im `warnings`-Array. Für diese Fälle empfiehlt sich der direkte PDF-Review in Claude.
-- **JPEG/PNG-Dokumente**: ebenfalls `source: "none"` mit Warnung. Direkte Claude-Analyse bleibt die zuverlässigste Option für Bilddokumente.
+- **Durchsuchbare PDFs** (mit Textlayer, z. B. von modernen Scannern oder digitalen Rechnungen): vollständige Textextraktion ohne OCR.
+- **Bildbasierte PDFs** (gescannte Seiten ohne Textlayer): OCR auf eingebettetes JPEG → `source: "ocr"` bei Erfolg, `source: "none"` bei Misserfolg.
+- **JPEG/PNG/TIFF-Dokumente**: direkte OCR → `source: "ocr"` bei Erfolg, `source: "none"` bei Misserfolg.
 - **VoucherZip-Fallback**: dient nur als zusätzliche serverseitige Dokumentquelle für die Extraktion. ZIP/PDF-Rohdaten werden nicht als Primärworkflow an Claude durchgereicht.
 - Felder, die nicht zuverlässig bestimmt werden können, sind `null` mit erklärender Warnung.
 - Die Batch-Varianten erlauben bis zu **20 Belege** pro Aufruf.
